@@ -1,36 +1,77 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# MeetMate · AI 组局推荐
 
-## Getting Started
+把群聊粘进去，自动读出「谁要什么、谁从哪出发」，实时检索高德真实商户，算通勤时间和花费，
+逐条核对每个人的要求，选出一家**能说清为什么选它**的店；资料查不清的店只进备选。
 
-First, run the development server:
+## 它到底做了什么
+
+1. **读懂群聊**：按「谁说了什么」切分行（支持微信复制、`名字 19:23`、`[19:23] 名字`、手打 `名字 内容` 等排版），
+   逐条抠出要求并标注提出者、强度（`hard` 不能让步 / `strong` 强烈希望 / `soft` 随便）、原话。
+2. **落每个人的位置**：原话里抓地名优先（「我从三墩出发」），AI 的解读兜底，
+   再交给高德 POI 检索定位（口语地名如「转塘」「良渚」「钱江新城」都能解析）。
+   读不到的人不画点、不画线、不参与锚点计算，不会拿假坐标凑数。
+3. **搜真店**：以「成员几何中心 + 离中心最远的那个人」双锚点检索，不和某个固定出发点绑定。
+4. **算两条路**：每个成员同时算驾车和地铁/公交，按「时间 × 时间价值 + 票钱」取更划算的那个。
+5. **逐条核对**：预算→人均、距离→耗时、室内外/类型→场所关键词，能算的用数据算；
+   语义类要求（「怕黑」「别太吵」）交给 AI 判，只允许判 `pass / conflict / unknown`，资料不足必须说 unknown。
+6. **定首选 + 备选**：硬性要求被违背的直接排除；资料查不清（关键要求 `unknown`）的店只进备选；
+   首选从「资料能说清」的店里出，AI 选错会按核对结果改选并说明原因。
+
+## 快速开始
+
+需要 Node.js 20+。
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+cp .env.example .env.local   # 填 AMAP_WEB_KEY
+npm run dev                  # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 两个 Key
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Key | 用途 | 放哪 |
+| --- | --- | --- |
+| `AMAP_WEB_KEY` | 高德 **Web 服务** 类型 Key，检索商户、算路线 | `.env.local`（服务端） |
+| AI Key（DeepSeek） | 读群聊、判语义要求 | 页面左下角「设置」里填，存 localStorage；也可在 `.env.local` 配 `DEEPSEEK_API_KEY` 让所有人共用 |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Key 只在服务端转发使用，不会打进前端产物。
 
-## Learn More
+## 目录结构
 
-To learn more about Next.js, take a look at the following resources:
+```
+src/
+  app/
+    page.tsx                     首页：粘贴群聊 → 生成方案
+    room/[id]/                   房间页：地图、首选、备选、成员、需求核对
+    room/[id]/chat/              追问与改方案
+    room/[id]/activity/          活动详情
+    api/
+      extract/                   群聊 → 成员 / 需求 / 关键词
+      plan/                      检索 + 测距 + 打分 + 决策
+      reroute/                   只改成员位置时重算
+      chat/                      追问（换一家、加条件）
+      geocode/ places/           地名解析与候选地点
+  lib/
+    planner.ts                   核心：抽取、成员定位、打分、决策、路线
+    place.ts                     口语地名 → 坐标（POI 检索 + 相似度/类型加权 + 地理编码兜底）
+    amap.ts                      高德接口封装（多锚点检索、驾车、公交地铁、缓存）
+    meetmate.ts                  共享类型
+    ai.ts                        DeepSeek 调用
+  components/                    地图、图标等
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## 可用脚本
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npm run dev      # 开发
+npm run build    # 生产构建
+npm start        # 生产启动（默认 3000，可用 PORT 指定）
+npm run lint
+```
 
-## Deploy on Vercel
+## 部署
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- **Vercel**：导入仓库 → 环境变量填 `AMAP_WEB_KEY` → 部署，无需额外配置。
+- **自建服务器 / 容器**：`npm ci && npm run build && npm start`，进程需监听 `PORT` 并绑定 `0.0.0.0`。
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+> `.env.local` 已被 `.gitignore` 忽略，不会进仓库。部署时在平台的环境变量里单独配置。
