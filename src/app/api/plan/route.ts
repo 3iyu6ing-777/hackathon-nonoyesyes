@@ -56,7 +56,8 @@ export async function POST(req: Request) {
         ok: false,
         code: "NO_KEY",
         error: "还没有配置 AI Key",
-        detail: "点左下角齿轮填入你自己的 API Key 后再试",
+        detail:
+          "点左下角齿轮填入你自己的 API Key；如果是线上部署，也可以在环境变量里配 DEEPSEEK_API_KEY 后重新 deploy",
       },
       { status: 400 }
     );
@@ -72,7 +73,7 @@ export async function POST(req: Request) {
         code: "NO_AMAP_KEY",
         error: "缺少高德 Web 服务 Key",
         detail:
-          "在设置面板填入高德 Key，或在服务端配置环境变量 AMAP_WEB_KEY。没有它就无法拿到真实地点。",
+          "在设置面板填入高德 Key，或在服务端配置环境变量 AMAP_WEB_KEY（类型选「Web 服务」，改完需重新 deploy）。没有它就无法拿到真实地点。",
       },
       { status: 400 }
     );

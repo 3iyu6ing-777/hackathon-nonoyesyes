@@ -22,7 +22,12 @@ export async function POST(req: Request) {
   const config = readConfig(body.config);
   if (!config.key) {
     return NextResponse.json(
-      { ok: false, code: "NO_KEY", error: "还没有配置 AI Key" },
+      {
+        ok: false,
+        code: "NO_KEY",
+        error: "还没有配置 AI Key",
+        detail: "左下角齿轮填自己的 Key，或在线上的环境变量里配 DEEPSEEK_API_KEY",
+      },
       { status: 400 }
     );
   }
@@ -32,7 +37,12 @@ export async function POST(req: Request) {
   ).trim();
   if (!amapKey) {
     return NextResponse.json(
-      { ok: false, code: "NO_AMAP_KEY", error: "缺少高德 Web 服务 Key" },
+      {
+        ok: false,
+        code: "NO_AMAP_KEY",
+        error: "缺少高德 Web 服务 Key",
+        detail: "线上要确认 AMAP_WEB_KEY 已配置并重新 deploy",
+      },
       { status: 400 }
     );
   }

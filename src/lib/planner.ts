@@ -69,6 +69,19 @@ const MAX_MEASURED = 10;
 const PRELIM_FOR_TRANSIT = 10;
 /** 单次规划最多发多少个公交查询，防止一个请求打爆配额（人均一条即可，留点余量） */
 const MAX_TRANSIT_PER_MEMBER = 12;
+
+/**
+ * 单次规划的「软截止」。
+ * Netlify 免费版函数是 10 秒硬超时，一次规划要跑 8-15 秒（高德驾车 + 地铁逐条查），
+ * 线上很容易直接 502。到点就先不再补地铁，剩下的候选退回打车估算，
+ * 宁可精度降一点，也别整个请求超时。
+ * 本地默认不限（起步预算 0），需要的话用 MEETMATE_BUDGET_MS 手动指定。
+ */
+function planBudgetMs(): number {
+  const raw = Number(process.env.MEETMATE_BUDGET_MS ?? "");
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  return process.env.NETLIFY ? 9000 : 0;
+}
 /** 步行可达距离，超过就没必要比打车了 */
 const WALK_LIMIT_M = 1800;
 const ACT_IDS = ACTIVITIES.map((a) => a.id);
@@ -1973,7 +1986,8 @@ export async function attachLegs(
   members: Member[],
   amapKey: string,
   city: string,
-  ctx: ScoreCtx
+  ctx: ScoreCtx,
+  deadline = 0
 ): Promise<{
   legsMap: Map<string, MemberLeg[]>;
   transitQueries: number;
@@ -2045,6 +2059,7 @@ export async function attachLegs(
 
     await mapLimit(jobs, 4, async (i) => {
       if (budgetLeft <= 0) return;
+      if (deadline && Date.now() > deadline) return;
       budgetLeft -= 1;
       rows[i] = await planTransit(
         amapKey,
@@ -2447,12 +2462,14 @@ async function finalize(input: {
     ),
   };
 
+  const timeBudget = planBudgetMs();
   const { legsMap, transitQueries } = await attachLegs(
     candidates,
     members,
     amapKey,
     city,
-    ctx
+    ctx,
+    timeBudget ? input.started + timeBudget : 0
   );
 
   // 第一轮只叠真实数据（人均、耗时、场所类型），语义要求先记 unknown

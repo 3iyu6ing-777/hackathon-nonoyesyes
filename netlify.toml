@@ -1,0 +1,13 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+# Netlify 默认 Node 20，Next 16 需要 20+；锁 22 和本地保持一致
+[build.environment]
+  NODE_VERSION = "22"
+
+# 注意：
+# 1) 不要写 /* /index.html 200 这种 SPA 兜底，会把 API 路由和 SSR 页面全吃掉
+# 2) 不需要手动装 @netlify/plugin-nextjs，Netlify 检测到 Next 13.5+ 会自动装
+# 3) AMAP_WEB_KEY / DEEPSEEK_API_KEY 要在 Site settings → Environment variables 里配，
+#    并且勾上 Functions（运行时可读）；改完必须重新 deploy 才生效
