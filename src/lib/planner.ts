@@ -64,7 +64,9 @@ export class PlannerError extends Error {
 const MAX_CHAT = 12_000;
 const MAX_MEMBERS = 6;
 /** 最多拿多少个候选去测路程 */
-const MAX_MEASURED = 10;
+// 高德 Web 服务有 QPS 限制，并发请求会排队：海外节点上 10 个候选测距要 8 秒。
+// 收紧到 8 个，墙钟时间降下来，头部候选的质量基本不受影响。
+const MAX_MEASURED = 8;
 /** 前几名再补一次地铁/公交查询（这个接口只能单人单目的地，费配额） */
 const PRELIM_FOR_TRANSIT = 10;
 /** 单次规划最多发多少个公交查询，防止一个请求打爆配额（人均一条即可，留点余量） */
@@ -3183,7 +3185,7 @@ export async function buildPlan(input: BuildPlanInput): Promise<PlanResult> {
     origin: { lat: anchors[0].lat, lng: anchors[0].lng },
     anchors,
     radius: ex.radius,
-    perKeyword: 8,
+    perKeyword: 6,
     city,
   });
 
@@ -3277,7 +3279,7 @@ export async function reroutePlan(input: {
       origin: { lat: origin.lat, lng: origin.lng },
       anchors,
       radius: plan.trace.radius,
-      perKeyword: 8,
+      perKeyword: 6,
       city,
     });
     candidates = pickCandidates(pois, MAX_MEASURED, anchors);

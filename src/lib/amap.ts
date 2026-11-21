@@ -196,10 +196,12 @@ export async function searchPois(
   const apiKey = (key ?? "").trim();
   if (!apiKey) throw new Error("缺少高德 Web 服务 Key");
 
+  // 关键词每多一个就多一批并发请求（锚点数 × 关键词数），
+  // 海外节点上排队明显，收到 3 个：够覆盖「主类型 + 两个同义说法」
   const words = opts.keywords
     .map((w) => w.trim())
     .filter(Boolean)
-    .slice(0, 4);
+    .slice(0, 3);
   if (!words.length) throw new Error("AI 没有给出可用的搜索关键词");
 
   const anchors = dedupeAnchors([opts.anchors?.[0] ?? opts.origin, ...(opts.anchors ?? []), opts.origin]);
