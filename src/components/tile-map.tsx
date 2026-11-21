@@ -226,12 +226,21 @@ export default function TileMap({
         };
 
         if (apiRef) {
+          // 工具条按钮可能在组件卸载后还被点一下（比如页面切换动画期间），
+          // 直接操作已 remove 的 map 会抛 `_leaflet_pos` 的 undefined 错误
+          const safe = (fn: () => void) => () => {
+            try {
+              if (map.getContainer()) fn();
+            } catch {
+              /* 地图已销毁，忽略 */
+            }
+          };
           apiRef.current = {
-            zoomIn: () => map.zoomIn(),
-            zoomOut: () => map.zoomOut(),
-            fitSpot: () => fit(spots.length ? spots : all, 15),
-            fitMembers: () => fit(members.length ? members : all, 14),
-            fitAll: () => fit(all, 14),
+            zoomIn: safe(() => map.zoomIn()),
+            zoomOut: safe(() => map.zoomOut()),
+            fitSpot: safe(() => fit(spots.length ? spots : all, 15)),
+            fitMembers: safe(() => fit(members.length ? members : all, 14)),
+            fitAll: safe(() => fit(all, 14)),
           };
         }
 
@@ -251,7 +260,11 @@ export default function TileMap({
 
     return () => {
       cancelled = true;
-      mapRef.current?.remove();
+      try {
+        mapRef.current?.remove();
+      } catch {
+        /* 正在动画/已被移除，忽略 */
+      }
       mapRef.current = null;
       if (apiRef) apiRef.current = null;
       setReady(false);
