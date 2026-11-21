@@ -110,6 +110,7 @@ export default function RoomClient({ roomId }: { roomId: string }) {
     return r.chat && r.chat.trim().length >= 10 ? r.chat : SAMPLE_CHAT;
   }, [roomId]);
 
+  // 判断「是不是示例聊天」要读 localStorage，只能放在挂载之后
   useEffect(() => {
     const r = loadRoom(roomId);
     setDemo(!(r.chat && r.chat.trim().length >= 10));

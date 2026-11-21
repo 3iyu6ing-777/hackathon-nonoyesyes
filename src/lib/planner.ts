@@ -2617,8 +2617,18 @@ async function finalize(input: {
   let decision: Decision | null = null;
   let decisionFallback = Boolean(input.skipDecision);
   const decideStart = Date.now();
+  // 地铁查询有自己的软截止（timeBudget），但 AI 决策要留足时间：
+  // 2.2 秒的下限会把还没写完的 JSON 掐断，结果反而退化成「评分第一」的机械文案。
+  // 这里改成「整体硬顶 22 秒」——平台愿意等就让它说完，来不及就整段跳过。
+  const hardCap = timeBudget ? 22000 : 0;
+  const decideTimeout = hardCap
+    ? hardCap - (Date.now() - input.started) - 500
+    : undefined;
   try {
     if (input.skipDecision) throw new Error("fast-mode");
+    if (decideTimeout != null && decideTimeout < 2800) {
+      throw new Error("out-of-time");
+    }
     const res = await decide(
       offered,
       offeredRanking,
@@ -2638,11 +2648,7 @@ async function finalize(input: {
           candidates.find((c) => c.id === input.avoidPickId)?.name ?? null,
       },
       config,
-      // 剩余预算不足就提前掐掉决策，宁可退回「评分第一 + 机械理由」，
-      // 也别让整个函数在 10 秒上被平台杀掉（那样用户什么都拿不到）
-      timeBudget
-        ? Math.max(2200, input.started + timeBudget - Date.now() - 200)
-        : undefined
+      decideTimeout
     );
     decision = res.decision;
   } catch {

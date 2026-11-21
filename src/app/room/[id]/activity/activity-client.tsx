@@ -19,6 +19,7 @@ export default function ActivityClient({ roomId }: { roomId: string }) {
   const [shareLink, setShareLink] = useState("");
   const [copied, setCopied] = useState(false);
 
+  // 房间数据存在 localStorage，只能在挂载后读，否则首屏 SSR 与 CSR 对不上
   useEffect(() => {
     const room = loadRoom(roomId);
     setSelected(room.activityId ?? null);

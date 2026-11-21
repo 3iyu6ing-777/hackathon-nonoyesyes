@@ -99,10 +99,14 @@ type RawPoi = {
   biz_ext?: unknown;
 };
 
+/** 高德会把「暂停营业」直接写进店名后缀，推荐一家关着的店比推荐一家远的更糟 */
+const CLOSED_RE = /暂停营业|已关闭|已停业|歇业|装修中|筹备中/;
+
 function normalize(raw: RawPoi): AmapPoi | null {
   const name = str(raw.name);
   const loc = str(raw.location);
   if (!name || !loc.includes(",")) return null;
+  if (CLOSED_RE.test(name)) return null;
   const [lngRaw, latRaw] = loc.split(",");
   const lng = Number(lngRaw);
   const lat = Number(latRaw);

@@ -22,6 +22,7 @@ export default function ChatClient({ roomId }: { roomId: string }) {
   const [error, setError] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // 群聊内容在 localStorage 里，挂载后才读得到
   useEffect(() => {
     const room = loadRoom(roomId);
     setChat(room.chat ?? "");

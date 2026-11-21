@@ -49,6 +49,7 @@ export default function SettingsPanel() {
   const pathname = usePathname();
   const hideLauncher = Boolean(pathname?.startsWith("/room/"));
 
+  // Key 存在浏览器 localStorage，挂载后读一次填进表单
   useEffect(() => {
     const cfg = loadApiConfig();
     setKey(cfg.key);
