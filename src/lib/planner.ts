@@ -72,10 +72,10 @@ const MAX_TRANSIT_PER_MEMBER = 12;
 
 /**
  * 单次规划的「软截止」。
- * Netlify 免费版函数是 10 秒硬超时，一次规划要跑 8-15 秒（高德驾车 + 地铁逐条查），
- * 线上很容易直接 502。到点就先不再补地铁，剩下的候选退回打车估算，
- * 宁可精度降一点，也别整个请求超时。
- * 本地默认不限（起步预算 0），需要的话用 MEETMATE_BUDGET_MS 手动指定。
+ * 国内直连高德是几百毫秒，海外节点（Netlify 走美东）单次就要 2-3 秒，
+ * 实测一次完整规划在线上约 12-16 秒。到点就先不再补地铁，剩下的候选退回打车估算，
+ * 宁可精度降一点，也别整个请求被平台掐断。
+ * 本地默认不限（预算 0），需要的话用 MEETMATE_BUDGET_MS 手动指定。
  */
 function planBudgetMs(): number {
   const raw = Number(process.env.MEETMATE_BUDGET_MS ?? "");
@@ -88,7 +88,8 @@ function planBudgetMs(): number {
       process.env.AWS_LAMBDA_FUNCTION_NAME ||
       process.env.LAMBDA_TASK_ROOT
   );
-  return onNetlify ? 8000 : 0;
+  // 实测线上站点能跑到 17 秒才返回，留 4 秒余量给收尾
+  return onNetlify ? 18000 : 0;
 }
 /** 步行可达距离，超过就没必要比打车了 */
 const WALK_LIMIT_M = 1800;
