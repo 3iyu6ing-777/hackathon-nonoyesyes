@@ -11,3 +11,7 @@
 # 2) 不需要手动装 @netlify/plugin-nextjs，Netlify 检测到 Next 13.5+ 会自动装
 # 3) AMAP_WEB_KEY / DEEPSEEK_API_KEY 要在 Site settings → Environment variables 里配，
 #    并且勾上 Functions（运行时可读）；改完必须重新 deploy 才生效
+# 4) 免费版同步函数硬超时 10 秒，一次完整分析（读群聊 + 定位 + 检索 + AI 总结）
+#    冷启动时可能贴线。代码里做了两层兜底：8 秒后不再补地铁查询、决策超时退回评分排序，
+#    前端遇到 502 会自动用 fast 模式重试一次。想彻底去掉这个约束只有两条路：
+#    升级到 Pro 并让客服把同步函数超时调到 26 秒，或换 Vercel（Hobby 默认 60 秒）。

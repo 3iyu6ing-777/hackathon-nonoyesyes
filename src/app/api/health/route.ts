@@ -19,8 +19,21 @@ export async function GET() {
     hasAmapKey: Boolean(amapKey),
     keyLengths: { ai: aiKey.length, amap: amapKey.length },
     node: process.version,
-    // Netlify 会把部署上下文塞进这些变量，用来确认「跑的是哪一次构建」
-    env: process.env.NETLIFY ? "netlify" : process.env.VERCEL ? "vercel" : "local",
+    // 函数运行时拿不到 NETLIFY，但一定有 CONTEXT / AWS_LAMBDA_FUNCTION_NAME
+    env:
+      process.env.CONTEXT ||
+      process.env.NETLIFY ||
+      process.env.AWS_LAMBDA_FUNCTION_NAME
+        ? "netlify"
+        : process.env.VERCEL
+          ? "vercel"
+          : "local",
+    // 单次规划的时间预算：线上按 8 秒算，到点就不再补地铁查询
+    budgetMs: Number(process.env.MEETMATE_BUDGET_MS ?? "") || 8000,
+    // 只报变量名，方便发现「名字写错了」（比如配成 AMAP_KEY）——不回显任何值
+    keyVars: Object.keys(process.env)
+      .filter((k) => /AMAP|DEEPSEEK|API_KEY|OPENAI/i.test(k))
+      .sort(),
     commit:
       process.env.COMMIT_REF?.slice(0, 7) ??
       process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ??

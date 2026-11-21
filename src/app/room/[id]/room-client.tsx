@@ -33,6 +33,8 @@ type Bubble = {
 
 type Phase = "loading" | "nokey" | "ready" | "error";
 
+type PlanResponse = { ok?: boolean; plan?: PlanResult } & ApiError;
+
 type OriginOverride = { originName: string; lat: number; lng: number };
 type PlaceOption = { name: string; address: string; lat: number; lng: number };
 
@@ -88,6 +90,8 @@ export default function RoomClient({ roomId }: { roomId: string }) {
   const [placeOptions, setPlaceOptions] = useState<PlaceOption[]>([]);
   const [placeBusy, setPlaceBusy] = useState(false);
   const [placeErr, setPlaceErr] = useState("");
+  /** 这次是不是走了「跳过 AI 总结」的快速模式（线上 10 秒限时兜底） */
+  const [fast, setFast] = useState(false);
   const [rerouting, setRerouting] = useState(false);
   const [legend, setLegend] = useState(true);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -136,7 +140,9 @@ export default function RoomClient({ roomId }: { roomId: string }) {
 
       setPhase("loading");
       setTick(0);
-      try {
+
+      /** 发一次规划请求；fast=true 时跳过 AI 总结，只用代码排序出结论（快 3 秒左右） */
+      const post = async (fast: boolean) => {
         const r = loadRoom(roomId);
         const res = await fetch("/api/plan", {
           method: "POST",
@@ -150,13 +156,54 @@ export default function RoomClient({ roomId }: { roomId: string }) {
             amapKey: cfg.amapKey,
             extraConstraints: extra ?? [],
             memberOverrides: overrideList,
+            fast,
           }),
         });
-        const data = (await res.json()) as {
-          ok?: boolean;
-          plan?: PlanResult;
-        } & ApiError;
+        // 线上函数超时（Netlify 免费版 10 秒）返回的是 HTML 或空响应，
+        // 直接 res.json() 会抛 SyntaxError，被下面的 catch 当成「服务没起来」。
+        // 先拿文本再自己解析，才能把「超时」和「连不上」分开告诉用户。
+        const raw = await res.text();
+        let data: PlanResponse | null = null;
+        try {
+          data = raw ? (JSON.parse(raw) as PlanResponse) : null;
+        } catch {
+          data = null;
+        }
+        return { res, raw, data };
+      };
+
+      try {
+        // 已经降级过的会话直接用快速模式，别每次都先白等 10 秒再退回
+        let out = await post(fast);
         if (my !== reqId.current) return;
+
+        // 10 秒硬上限掐掉了第一次：自动降级重试一次。
+        // 服务端已经把「读群聊」的结果缓存住（同一进程内 10 分钟），
+        // 第二次再跳过 AI 总结，基本 3-5 秒一定能出结果，比让用户对着报错强。
+        if (
+          !out.data &&
+          (out.res.status === 502 || out.res.status === 504 || !out.res.status)
+        ) {
+          setFast(true);
+          out = await post(true);
+          if (my !== reqId.current) return;
+        }
+
+        const { res, raw, data } = out;
+        if (!data) {
+          const timedOut = res.status === 502 || res.status === 504 || !res.status;
+          setErr({
+            code: timedOut ? "TIMEOUT" : "BAD_RESPONSE",
+            error: timedOut
+              ? "分析超时了：线上函数单次只能跑 10 秒"
+              : `服务返回了异常响应（${res.status || "无状态码"}）`,
+            detail: timedOut
+              ? "已经自动降级重试过一次还是超时。点「重试」通常就能出结果——读群聊的结果会在服务端缓存 10 分钟。"
+              : raw.slice(0, 300),
+          });
+          setPhase("error");
+          return;
+        }
         if (!res.ok || !data.ok || !data.plan) {
           setErr(data);
           setPhase("error");
@@ -168,12 +215,16 @@ export default function RoomClient({ roomId }: { roomId: string }) {
         if (my !== reqId.current) return;
         setErr({
           code: "NETWORK",
-          error: "没能连上本地服务，确认 dev server 还在运行",
+          error: "请求没有发出去或被中断",
+          detail:
+            location.hostname === "localhost"
+              ? "本地开发服务可能已经停了，重新跑 npm run dev"
+              : "网络中断或请求超时，稍等一下点「重试」",
         });
         setPhase("error");
       }
     },
-    [chatText, myPlace, roomId, overrideList]
+    [chatText, myPlace, roomId, overrideList, fast]
   );
 
   useEffect(() => {
@@ -1014,6 +1065,11 @@ function PlaceCard({ plan, onLocate }: { plan: PlanResult; onLocate: () => void 
           推荐理由
         </p>
         <p className="mt-1 text-[10.5px] leading-relaxed text-fg-muted">{p.reason}</p>
+        {plan.trace.decisionFallback && (
+          <p className="mt-1 text-[9.5px] leading-relaxed text-fg-dim">
+            线上函数限时 10 秒，这一版省掉了 AI 综合判断，结论由评分排序直接给出。
+          </p>
+        )}
         {p.cautions.slice(0, 2).map((c) => (
           <p key={c} className="mt-1 text-[10px] leading-relaxed text-amber-600">
             注意：{c}

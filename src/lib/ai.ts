@@ -98,6 +98,8 @@ export async function callChat(
     maxTokens?: number;
     thinking?: boolean;
     timeoutMs?: number;
+    /** 默认不传，交给上游；抽取/决策这类任务要压到 0.2 左右才稳定 */
+    temperature?: number;
   } = {}
 ): Promise<{ text: string; model: string }> {
   const key = (cfg.key ?? "").trim();
@@ -120,6 +122,9 @@ export async function callChat(
   }
   if (opts.json) {
     payload.response_format = { type: "json_object" };
+  }
+  if (typeof opts.temperature === "number") {
+    payload.temperature = opts.temperature;
   }
 
   const controller = new AbortController();

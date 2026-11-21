@@ -80,7 +80,15 @@ const MAX_TRANSIT_PER_MEMBER = 12;
 function planBudgetMs(): number {
   const raw = Number(process.env.MEETMATE_BUDGET_MS ?? "");
   if (Number.isFinite(raw) && raw > 0) return raw;
-  return process.env.NETLIFY ? 9000 : 0;
+  // 注意：NETLIFY 只在构建阶段有值，函数运行时是空的；
+  // 函数里能认出 Netlify 的是 CONTEXT / AWS_LAMBDA_FUNCTION_NAME 这些。
+  const onNetlify = Boolean(
+    process.env.CONTEXT ||
+      process.env.NETLIFY ||
+      process.env.AWS_LAMBDA_FUNCTION_NAME ||
+      process.env.LAMBDA_TASK_ROOT
+  );
+  return onNetlify ? 8000 : 0;
 }
 /** 步行可达距离，超过就没必要比打车了 */
 const WALK_LIMIT_M = 1800;
@@ -941,12 +949,73 @@ type Extracted = {
 
 type MemberSeed = RawMember & { constraints: string[]; wishes: string[] };
 
+/**
+ * 同一段群聊的分析结果缓存。
+ * 线上（Netlify 免费版）同步函数只有 10 秒，一次完整规划已经很贴线；
+ * 用户点第二次、或两个人拿同一段群聊试的时候，不该再从零读一遍群聊。
+ * 只存在当前函数实例内存里，10 分钟过期，最多 8 份，不写任何存储。
+ */
+const EXTRACT_TTL_MS = 10 * 60 * 1000;
+const EXTRACT_CACHE_MAX = 8;
+const extractCache = new Map<
+  string,
+  { at: number; data: Extracted; model: string }
+>();
+
+function extractKey(
+  chat: string,
+  activityId: ActivityId,
+  custom: string,
+  extra: string[] = []
+) {
+  // 不引 crypto：这里只求同一段文本落到同一个 key，不需要抗碰撞
+  let h = 0;
+  // 追加要求也要进 key：同一句追问重试时才算得中
+  const src = `${activityId}|${custom}|${extra.join("\u0001")}|${chat}`;
+  for (let i = 0; i < src.length; i++) {
+    h = (h * 31 + src.charCodeAt(i)) | 0;
+  }
+  return `${src.length}:${h}`;
+}
+
 async function extract(
   chat: string,
   defaultActivityId: ActivityId,
   config: ApiConfig,
   extra: string[],
-  customLabel = ""
+  customLabel = "",
+  timeoutMs?: number
+): Promise<{ data: Extracted; model: string }> {
+  const key = extractKey(chat, defaultActivityId, customLabel, extra);
+  const hit = extractCache.get(key);
+  if (hit && Date.now() - hit.at < EXTRACT_TTL_MS) {
+    return { data: hit.data, model: hit.model };
+  }
+  const res = await extractUncached(
+    chat,
+    defaultActivityId,
+    config,
+    extra,
+    customLabel,
+    timeoutMs
+  );
+  extractCache.delete(key);
+  extractCache.set(key, { at: Date.now(), ...res });
+  while (extractCache.size > EXTRACT_CACHE_MAX) {
+    const first = extractCache.keys().next().value;
+    if (first == null) break;
+    extractCache.delete(first);
+  }
+  return res;
+}
+
+async function extractUncached(
+  chat: string,
+  defaultActivityId: ActivityId,
+  config: ApiConfig,
+  extra: string[],
+  customLabel = "",
+  timeoutMs?: number
 ): Promise<{ data: Extracted; model: string }> {
   const custom = customLabel.trim().slice(0, 30);
   // 用户在界面上选了「其他」，活动类型就不再由 AI 猜
@@ -1014,7 +1083,14 @@ async function extract(
       { role: "system", content: system },
       { role: "user", content: user },
     ],
-    { json: true, thinking: false, maxTokens: 2800 }
+    // 抽取任务要的是「照抄群聊」，温度高了会把没说的话编出来
+    {
+      json: true,
+      thinking: false,
+      maxTokens: 2800,
+      temperature: 0.2,
+      timeoutMs,
+    }
   );
 
   const parsed = parseJsonLoose(text);
@@ -2171,7 +2247,8 @@ async function decide(
     previousPickName?: string | null;
     avoidPickName?: string | null;
   },
-  config: ApiConfig
+  config: ApiConfig,
+  timeoutMs?: number
 ): Promise<{ decision: Decision | null; model: string }> {
   // 只让 AI 判断数据判断不了的语义要求，能算的已经算完了
   const semantic = ctx.needs
@@ -2184,15 +2261,16 @@ async function decide(
 分两步：先把语义要求逐条对到候选上，再选一家。
 
 只输出 JSON，不要任何解释文字：
-{"pickId":"候选id","reason":"60字以内","matchPoints":["..."],"cautions":["..."],"checks":[{"candId":"候选id","needId":"n3","verdict":"pass","why":"12字内依据"}]}
+{"pickId":"候选id","reason":"60字以内","matchPoints":["..."],"cautions":["..."],"checks":[{"candId":"候选id","pass":["n1","n4"],"unknown":["n2"],"fail":{"n3":"12字内依据"}}]}
 
 规则：
 1. pickId 必须是候选里出现过的 id，严禁编造。
-2. checks 只判「需要你判断的要求」（下面给了 needId 清单），每条 × 每个候选都要给一条：
+2. checks 只判「需要你判断的要求」（下面给了 needId 清单），**每个候选一条记录**，
+   把这条要求清单里的 id 分到三个桶里：
    - pass：从候选的名称 / 类型 / 地址 / 人均 / 营业时间能看出满足
-   - conflict：能看出违背（例如"A 怕黑"遇到密室主题、"别太辣"遇到川菜馆）
-   - unknown：现有资料看不出来。**信息不足时必须返回 unknown，绝对不许猜。**"卫生好不好""会不会吵"这类没有数据，就是 unknown。
-   - why 不超过 14 字，只写依据，不要复述要求。
+   - fail：能看出违背，值里写 12 字内依据（例如"A 怕黑"遇到密室主题、"别太辣"遇到川菜馆）
+   - unknown：现有资料看不出来。**信息不足时必须放进 unknown，绝对不许猜。**"卫生好不好""会不会吵"这类没有数据，就是 unknown。
+   三个桶里的 id 只能来自上面的 needId 清单，不许自造；判断不了就放 unknown。
 3. 判 conflict 要保守：只有名称或类型能明确指向时才判，不要因为"可能"就打叉。
    **口味类要求（不能吃辣 / 清淡 / 不要香菜 / 不吃内脏）属于菜单级，没有菜单数据一律 unknown**
    —— 烧烤店可以点不辣的，火锅店有鸳鸯锅，只有店名/类型强指向（"麻辣烫""重庆老火锅"遇到"一点辣都不能吃"）才判 conflict。
@@ -2265,9 +2343,16 @@ ${formatRanked(offered, ranking, legsMap)}`;
       { role: "system", content: system },
       { role: "user", content: user },
     ],
-    // 5 个人 × 8 条要求 × 4 个候选，checks 能到 32 条；2600 会被截断成
-    // 半截 JSON，整段决策直接降级成「综合分第一」的代码文案
-    { json: true, thinking: false, maxTokens: 3600 }
+    // checks 用「每个候选一个对象」的紧凑格式，把 32 条判定压成 4 条记录；
+    // 上限留 2000 足够，超了也是被截断成半截 JSON，整段降级成代码文案
+    {
+      json: true,
+      thinking: false,
+      maxTokens: 2000,
+      // 同一条群聊要给出同一个结论，温度压到 0.2
+      temperature: 0.2,
+      timeoutMs,
+    }
   );
 
   const parsed = parseJsonLoose(text);
@@ -2275,14 +2360,40 @@ ${formatRanked(offered, ranking, legsMap)}`;
 
   const checks = new Map<string, { verdict: NeedVerdict; why: string }>();
   const rawChecks = Array.isArray(parsed.checks) ? parsed.checks : [];
+  const isNeed = (id: string) => semantic.some((n) => n.id === id);
   for (const item of rawChecks) {
     if (!item || typeof item !== "object") continue;
     const rec = item as Record<string, unknown>;
     const candId = String(rec.candId ?? "").trim();
+    if (!offer.some((p) => p.id === candId)) continue;
+
+    // 新格式：一个候选一条记录，pass / unknown 是 id 数组，fail 是 {id: 依据}
+    if (Array.isArray(rec.pass) || Array.isArray(rec.unknown) || rec.fail) {
+      for (const id of strList(rec.pass, 20, 8)) {
+        if (isNeed(id)) checks.set(`${candId}:${id}`, { verdict: "pass", why: "" });
+      }
+      for (const id of strList(rec.unknown, 20, 8)) {
+        if (isNeed(id))
+          checks.set(`${candId}:${id}`, { verdict: "unknown", why: "" });
+      }
+      const fail =
+        rec.fail && typeof rec.fail === "object"
+          ? (rec.fail as Record<string, unknown>)
+          : {};
+      for (const [id, why] of Object.entries(fail)) {
+        if (!isNeed(id)) continue;
+        checks.set(`${candId}:${id}`, {
+          verdict: "conflict",
+          why: String(why ?? "").trim().slice(0, 40),
+        });
+      }
+      continue;
+    }
+
+    // 旧格式（一条一个判定）继续认，免得换提示词那一刻整段判定全丢
     const needId = String(rec.needId ?? "").trim();
     const verdict = String(rec.verdict ?? "").trim();
-    if (!offer.some((p) => p.id === candId)) continue;
-    if (!semantic.some((n) => n.id === needId)) continue;
+    if (!isNeed(needId)) continue;
     if (verdict !== "pass" && verdict !== "conflict" && verdict !== "unknown") {
       continue;
     }
@@ -2413,6 +2524,8 @@ export type BuildPlanInput = {
    * 免得「说了一条新要求，反而把原来三条要求弄丢了」。
    */
   previousNeeds?: Need[];
+  /** 快速模式：跳过 AI 综合判断，只用评分排序 + 代码文案（线上限时兜底） */
+  skipDecision?: boolean;
 };
 
 /** 从「候选 + 路程 + 评分」走到最终方案，两处入口（首次规划 / 只改位置）共用 */
@@ -2439,6 +2552,10 @@ async function finalize(input: {
   previousPickName?: string | null;
   /** 用户点名要换掉的那家，AI 被禁止再选它 */
   avoidPickId?: string | null;
+  /** 快速模式：跳过 AI 综合判断，只用评分排序 + 代码文案（线上限时兜底） */
+  skipDecision?: boolean;
+  /** 调用方传进来的耗时桶，各阶段往里写毫秒数 */
+  timing?: Record<string, number>;
 }): Promise<PlanResult> {
   const {
     candidates,
@@ -2463,6 +2580,8 @@ async function finalize(input: {
   };
 
   const timeBudget = planBudgetMs();
+  const timing = input.timing ?? {};
+  const legsStart = Date.now();
   const { legsMap, transitQueries } = await attachLegs(
     candidates,
     members,
@@ -2471,6 +2590,8 @@ async function finalize(input: {
     ctx,
     timeBudget ? input.started + timeBudget : 0
   );
+
+  timing.legs = Date.now() - legsStart;
 
   // 第一轮只叠真实数据（人均、耗时、场所类型），语义要求先记 unknown
   const prelim = rankCandidates(candidates, legsMap, ctx);
@@ -2487,8 +2608,10 @@ async function finalize(input: {
   // AI 只负责两件事：把语义要求逐条判一遍，然后在这几个头部候选里挑一个。
   // 调用失败不影响出结果，退化成「评分第一 + 机械理由」，避免一次超时整份方案全废。
   let decision: Decision | null = null;
-  let decisionFallback = false;
+  let decisionFallback = Boolean(input.skipDecision);
+  const decideStart = Date.now();
   try {
+    if (input.skipDecision) throw new Error("fast-mode");
     const res = await decide(
       offered,
       offeredRanking,
@@ -2507,12 +2630,18 @@ async function finalize(input: {
         avoidPickName:
           candidates.find((c) => c.id === input.avoidPickId)?.name ?? null,
       },
-      config
+      config,
+      // 剩余预算不足就提前掐掉决策，宁可退回「评分第一 + 机械理由」，
+      // 也别让整个函数在 10 秒上被平台杀掉（那样用户什么都拿不到）
+      timeBudget
+        ? Math.max(2200, input.started + timeBudget - Date.now() - 200)
+        : undefined
     );
     decision = res.decision;
   } catch {
     decisionFallback = true;
   }
+  timing.decide = Date.now() - decideStart;
 
   // 第二轮把 AI 的语义判定并回评分再排一次：同一家店，如果 AI 判出「小D 怕黑 → 密室主题」
   // 这种数据看不出来的冲突，分数会当场掉下来，榜单和结论就跟着变。
@@ -2753,9 +2882,11 @@ async function finalize(input: {
       reason: overridden
         ? `按逐条核对改选：${decisionNote}`
         : decision?.reason ||
-          `逐条核对后综合分第一：满足 ${checks.filter((c) => c.verdict === "pass").length} 条要求，人均 ${
-            chosen.cost || "未知"
-          }，评分 ${chosen.rating || "未知"}。`,
+          `逐条核对后综合分第一：满足 ${
+            checks.filter((c) => c.verdict === "pass").length
+          } 条要求，人均 ${
+            chosen.cost ? chosen.cost.replace(/\.0+$/, "") : "未知"
+          } 元，评分 ${chosen.rating || "未知"}。`,
       matchPoints: overridden ? [] : (decision?.matchPoints ?? []),
       cautions,
       perMember: legs,
@@ -2776,6 +2907,7 @@ async function finalize(input: {
       decisionFallback,
       aiChecks: aiChecks.size,
       decisionNote,
+      timing: { ...timing, total: Date.now() - input.started },
     },
   };
 }
@@ -2793,14 +2925,28 @@ export async function buildPlan(input: BuildPlanInput): Promise<PlanResult> {
     );
   }
 
+  const timing: Record<string, number> = {};
+
+  // 城市中心先按「地名兜底」猜一个，跟读群聊同时发出去：城市中心只用来兜底，
+  // 猜错也只是多一次用不上的请求，比干等 AI 读完再发快 0.3 秒。
+  const guessCity = input.city?.trim() || cityFromChat(chat) || "杭州";
+  const centerEarly = input.origin
+    ? null
+    : cityCenter(input.amapKey, guessCity).catch(() => null);
+
   // 1) AI 读群聊：全体条件 + 每个人的说法 + 预算/通勤上限
+  const hardBudget = planBudgetMs();
   const { data: ex, model } = await extract(
     chat,
     input.defaultActivityId,
     input.config,
     input.extraConstraints ?? [],
-    input.customActivity ?? ""
+    input.customActivity ?? "",
+    // 抽出群聊至少要 3 秒，剩下的时间留给定位、检索和决策
+    hardBudget ? Math.max(3500, hardBudget - 3500) : undefined
   );
+
+  timing.extract = Date.now() - started;
 
   // 1.1) 城市：调用方显式指定 > AI 从群聊判断 > 地标兜底 > 杭州
   //      以前写死杭州，粘一段成都的群聊会被拿去杭州搜店，位置全对不上。
@@ -2975,7 +3121,12 @@ export async function buildPlan(input: BuildPlanInput): Promise<PlanResult> {
 
   // 2) 成员落点：AI 读到的出发地 + 原话兜底，都要过高德地理编码
   //    没有任何位置信息时才退回「用户自己的出发点」，再不行就用城市中心
-  const base = input.origin ?? (await cityCenter(input.amapKey, city));
+  const memberStart = Date.now();
+  const base =
+    input.origin ??
+    (city === guessCity
+      ? (await centerEarly) ?? (await cityCenter(input.amapKey, city))
+      : await cityCenter(input.amapKey, city));
   const members = await resolveMembers(
     ex.members,
     chat,
@@ -3009,8 +3160,11 @@ export async function buildPlan(input: BuildPlanInput): Promise<PlanResult> {
     }
   }
 
+  timing.members = Date.now() - memberStart;
+
   // 3) 围绕「成员中心 + 最远的那个人」检索，位置一改池子就跟着变
   const anchors = anchorsOf(members, base);
+  const searchStart = Date.now();
   const { pois, mode } = await searchPois(input.amapKey, {
     keywords: ex.keywords,
     origin: { lat: anchors[0].lat, lng: anchors[0].lng },
@@ -3019,6 +3173,8 @@ export async function buildPlan(input: BuildPlanInput): Promise<PlanResult> {
     perKeyword: 8,
     city,
   });
+
+  timing.search = Date.now() - searchStart;
 
   if (!pois.length) {
     throw new PlannerError(
@@ -3049,6 +3205,8 @@ export async function buildPlan(input: BuildPlanInput): Promise<PlanResult> {
     anchors,
     previousPickName: input.previousPickName ?? null,
     avoidPickId: input.avoidPickId ?? null,
+    skipDecision: input.skipDecision ?? false,
+    timing,
   });
 
   return { ...plan, trace: { ...plan.trace, model } };

@@ -118,6 +118,8 @@ export async function POST(req: Request) {
         : [],
       city: typeof body.city === "string" ? body.city : undefined,
       memberOverrides,
+      // 线上函数 10 秒上限的兜底：前端超时后会带 fast 重试一次
+      skipDecision: body.fast === true,
     });
 
     return NextResponse.json({ ok: true, plan });

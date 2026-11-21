@@ -492,5 +492,7 @@ export type PlanResult = {
     aiChecks: number;
     /** AI 选的那家踩了硬性要求、被代码改选时，这里说明原因 */
     decisionNote?: string;
+    /** 各阶段耗时（毫秒），线上超时时靠它定位是哪一步慢 */
+    timing?: Record<string, number>;
   };
 };
