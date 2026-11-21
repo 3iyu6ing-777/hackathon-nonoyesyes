@@ -29,7 +29,7 @@ export async function GET() {
           ? "vercel"
           : "local",
     // 单次规划的时间预算：线上按 8 秒算，到点就不再补地铁查询
-    budgetMs: Number(process.env.MEETMATE_BUDGET_MS ?? "") || 18000,
+    budgetMs: Number(process.env.MEETMATE_BUDGET_MS ?? "") || 14000,
     // 只报变量名，方便发现「名字写错了」（比如配成 AMAP_KEY）——不回显任何值
     keyVars: Object.keys(process.env)
       .filter((k) => /AMAP|DEEPSEEK|API_KEY|OPENAI/i.test(k))

@@ -88,8 +88,9 @@ function planBudgetMs(): number {
       process.env.AWS_LAMBDA_FUNCTION_NAME ||
       process.env.LAMBDA_TASK_ROOT
   );
-  // 实测线上站点能跑到 17 秒才返回，留 4 秒余量给收尾
-  return onNetlify ? 18000 : 0;
+  // 实测线上：预算 8 秒时 14.7 秒返回（地铁没来得及补），预算 18 秒会顶到
+  // 平台 ~26 秒上限直接 504。14 秒是「能补一部分地铁、又留足收尾」的位置。
+  return onNetlify ? 14000 : 0;
 }
 /** 步行可达距离，超过就没必要比打车了 */
 const WALK_LIMIT_M = 1800;
@@ -2120,8 +2121,13 @@ export async function attachLegs(
   // 每个人的地铁/公交方案都要算到。之前总量卡在 40 次，尾部的候选算不出地铁、
   // 只剩打车时长，于是「没被查到地铁」的店看起来比查过的近一大截
   // （小E 从良渚出发，同一家店打车 41 分钟、地铁 103 分钟）。
+  // 海外节点上高德单次要 1-2 秒，60 次地铁查询能把整个请求拖到超时。
+  // 有软截止（serverless）时只补最关键的十几个，保证「至少头部候选有真实地铁时长」。
+  const transitCap = planBudgetMs()
+    ? Math.max(members.length * 3, 12)
+    : members.length * MAX_TRANSIT_PER_MEMBER;
   const transitBudget = Math.min(
-    members.length * MAX_TRANSIT_PER_MEMBER,
+    transitCap,
     members.length * targets.length
   );
   let budgetLeft = transitBudget;
@@ -2134,7 +2140,7 @@ export async function attachLegs(
       jobs.push(i);
     });
 
-    await mapLimit(jobs, 4, async (i) => {
+    await mapLimit(jobs, 6, async (i) => {
       if (budgetLeft <= 0) return;
       if (deadline && Date.now() > deadline) return;
       budgetLeft -= 1;
