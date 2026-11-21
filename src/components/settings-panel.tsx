@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
 import { Icon } from "@/components/icons";
 import {
   DEFAULT_BASE_URL,
@@ -43,6 +44,10 @@ export default function SettingsPanel() {
   const [mapDiag, setMapDiag] = useState<Diag | null>(null);
   const [saveNote, setSaveNote] = useState("");
   const panelRef = useRef<HTMLDivElement>(null);
+  // 房间页底部左右两侧是输入框和地图图例，浮层会压住内容；
+  // 那一页的入口放在顶栏「配置 Key」，这里就不再固定一个按钮。
+  const pathname = usePathname();
+  const hideLauncher = Boolean(pathname?.startsWith("/room/"));
 
   useEffect(() => {
     const cfg = loadApiConfig();
@@ -156,14 +161,18 @@ export default function SettingsPanel() {
 
   return (
     <>
-      <div className="fixed bottom-5 left-5 z-[900] flex flex-col items-start gap-2">
+      <div
+        className={`fixed bottom-4 left-4 z-[900] flex-col items-start gap-2 ${
+          hideLauncher ? "hidden" : "flex"
+        }`}
+      >
         {!open && !configured && (
           <button
             type="button"
             onClick={() => setOpen(true)}
-            className="ml-1 flex items-center gap-1.5 rounded-full border border-green/35 bg-green/10 px-3 py-1.5 text-xs text-green shadow-lg shadow-black/30 backdrop-blur transition-colors hover:bg-green/16"
+            className="ml-1 flex items-center gap-1.5 rounded-full border border-brand/25 bg-white/95 px-3 py-1.5 text-[11px] text-brand shadow-[0_10px_24px_-14px_rgba(37,99,235,0.7)] backdrop-blur transition-colors hover:bg-brand-soft"
           >
-            <Icon name="spark" size={13} />
+            <Icon name="sparkles" size={12} />
             点这里配置 AI Key
           </button>
         )}
@@ -174,17 +183,17 @@ export default function SettingsPanel() {
             setSaveNote("");
           }}
           aria-label="AI 设置"
-          className="relative flex h-11 w-11 items-center justify-center rounded-full border border-line bg-surface-2 text-fg-muted shadow-lg shadow-black/40 transition-colors hover:text-fg"
+          className="relative flex h-9 w-9 items-center justify-center rounded-full border border-line bg-white/95 text-fg-muted shadow-[0_10px_24px_-16px_rgba(15,23,42,0.6)] backdrop-blur transition-colors hover:text-brand"
         >
-          <Icon name="gear" size={19} />
+          <Icon name="gear" size={16} />
           {!configured && (
             <span className="absolute -right-0.5 -top-0.5 flex h-2.5 w-2.5">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green/70" />
-              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-green" />
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand/60" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-brand" />
             </span>
           )}
           {configured && (
-            <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-green ring-2 ring-surface-2" />
+            <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-white" />
           )}
         </button>
       </div>
@@ -192,15 +201,15 @@ export default function SettingsPanel() {
       {open && (
         <div
           ref={panelRef}
-          className="fixed bottom-20 left-5 z-[901] max-h-[min(76vh,640px)] w-[min(392px,calc(100vw-2.5rem))] overflow-y-auto rounded-2xl border border-line bg-surface p-4 shadow-2xl shadow-black/60"
+          className="mm-scroll fixed bottom-16 left-4 z-[901] max-h-[min(78vh,640px)] w-[min(390px,calc(100vw-2rem))] overflow-y-auto rounded-[20px] border border-line bg-white p-4 shadow-[0_24px_60px_-24px_rgba(15,23,42,0.45)]"
         >
           <div className="flex items-start justify-between gap-3">
             <div>
-              <h3 className="flex items-center gap-2 text-sm font-semibold">
-                <Icon name="key" size={15} className="text-green" />
+              <h3 className="flex items-center gap-1.5 text-[13.5px] font-semibold">
+                <Icon name="key" size={14} className="text-brand" />
                 配置
               </h3>
-              <p className="mt-1 text-[11px] leading-relaxed text-fg-dim">
+              <p className="mt-1 text-[10.5px] leading-relaxed text-fg-dim">
                 两个 Key 都只保存在你自己的浏览器里，请求时随请求体发给本站转发，服务端不存储、不落日志。
               </p>
             </div>
@@ -208,19 +217,17 @@ export default function SettingsPanel() {
               type="button"
               onClick={() => setOpen(false)}
               aria-label="关闭"
-              className="rounded-md px-1.5 py-0.5 text-fg-dim transition-colors hover:bg-white/6 hover:text-fg"
+              className="rounded-md p-1 text-fg-dim transition-colors hover:bg-surface-2 hover:text-fg"
             >
-              ✕
+              <Icon name="close" size={14} />
             </button>
           </div>
 
-          <div className="mt-3.5 rounded-xl border border-line bg-bg/40 p-2.5">
-            <label className="block text-[11px] font-medium text-fg-muted">
+          <div className="mt-3.5 rounded-[14px] border border-line bg-[#fbfdff] p-2.5">
+            <label className="block text-[10.5px] font-medium text-fg-muted">
               <span className="flex items-center justify-between">
                 AI Key（必需）
-                <span className="text-[10px] font-normal text-fg-dim">
-                  DeepSeek 默认
-                </span>
+                <span className="text-[9.5px] font-normal text-fg-dim">DeepSeek 默认</span>
               </span>
               <div className="mt-1 flex items-center gap-2">
                 <input
@@ -233,12 +240,12 @@ export default function SettingsPanel() {
                   placeholder="sk-..."
                   spellCheck={false}
                   autoComplete="off"
-                  className="w-full rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-xs text-fg outline-none transition-colors placeholder:text-fg-dim focus:border-green/50"
+                  className="mm-input w-full px-2.5 py-1.5 font-mono text-[11px]"
                 />
                 <button
                   type="button"
                   onClick={() => setReveal((v) => !v)}
-                  className="shrink-0 rounded-md px-2 py-1 text-[11px] text-fg-dim transition-colors hover:text-fg"
+                  className="shrink-0 rounded-md px-1.5 py-1 text-[10px] text-fg-dim transition-colors hover:text-brand"
                 >
                   {reveal ? "隐藏" : "显示"}
                 </button>
@@ -246,53 +253,50 @@ export default function SettingsPanel() {
             </label>
 
             {configured && trimmed && (
-              <p className="mt-1.5 text-[11px] text-green">
-                已配置：{maskKey(trimmed)}
-              </p>
+              <p className="mt-1.5 text-[10px] text-emerald-600">已配置：{maskKey(trimmed)}</p>
             )}
 
-            <div className="mt-2 flex gap-2">
+            <div className="mt-2 flex gap-1.5">
               <button
                 type="button"
                 onClick={() => void testAi()}
                 disabled={busy !== "none"}
-                className="rounded-lg border border-line px-2.5 py-1.5 text-[11px] text-fg-muted transition-colors hover:text-fg disabled:opacity-50"
+                className="mm-btn-ghost h-7 px-2.5 text-[10px]"
               >
                 {busy === "ai" ? "检测中…" : "测试 AI"}
               </button>
               <button
                 type="button"
                 onClick={() => setAdvanced((v) => !v)}
-                className="rounded-lg border border-line px-2.5 py-1.5 text-[11px] text-fg-dim transition-colors hover:text-fg-muted"
+                className="mm-btn-ghost h-7 px-2.5 text-[10px]"
               >
                 {advanced ? "收起高级" : "高级"}
               </button>
             </div>
 
             {advanced && (
-              <div className="mt-2 space-y-2 rounded-lg border border-line bg-surface-2/60 p-2.5">
-                <label className="block text-[11px] text-fg-muted">
+              <div className="mt-2 space-y-2 rounded-lg border border-line bg-white p-2.5">
+                <label className="block text-[10px] text-fg-muted">
                   接口地址
                   <input
                     value={baseUrl}
                     onChange={(e) => setBaseUrl(e.target.value)}
                     spellCheck={false}
-                    className="mt-1 w-full rounded-md border border-line bg-surface px-2 py-1.5 font-mono text-[11px] text-fg outline-none focus:border-green/50"
+                    className="mm-input mt-1 w-full px-2 py-1.5 font-mono text-[10px]"
                   />
                 </label>
-                <label className="block text-[11px] text-fg-muted">
+                <label className="block text-[10px] text-fg-muted">
                   模型名
                   <input
                     value={model}
                     onChange={(e) => setModel(e.target.value)}
                     spellCheck={false}
-                    className="mt-1 w-full rounded-md border border-line bg-surface px-2 py-1.5 font-mono text-[11px] text-fg outline-none focus:border-green/50"
+                    className="mm-input mt-1 w-full px-2 py-1.5 font-mono text-[10px]"
                   />
                 </label>
-                <p className="text-[10px] leading-relaxed text-fg-dim">
+                <p className="text-[9px] leading-relaxed text-fg-dim">
                   DeepSeek 填 https://api.deepseek.com 即可，路径会自动补全。可用模型：
-                  deepseek-flash、deepseek-v4-pro。换成其它 OpenAI
-                  兼容服务时填到域名就行。
+                  deepseek-flash、deepseek-v4-pro。换成其它 OpenAI 兼容服务时填到域名就行。
                 </p>
               </div>
             )}
@@ -300,13 +304,11 @@ export default function SettingsPanel() {
             {aiDiag && <DiagBox diag={aiDiag} />}
           </div>
 
-          <div className="mt-3 rounded-xl border border-line bg-bg/40 p-2.5">
-            <label className="block text-[11px] font-medium text-fg-muted">
+          <div className="mt-2.5 rounded-[14px] border border-line bg-[#fbfdff] p-2.5">
+            <label className="block text-[10.5px] font-medium text-fg-muted">
               <span className="flex items-center justify-between">
                 高德 Web 服务 Key（必需）
-                <span className="text-[10px] font-normal text-fg-dim">
-                  console.amap.com
-                </span>
+                <span className="text-[9.5px] font-normal text-fg-dim">console.amap.com</span>
               </span>
               <input
                 type="password"
@@ -318,10 +320,10 @@ export default function SettingsPanel() {
                 placeholder="32 位十六进制"
                 spellCheck={false}
                 autoComplete="off"
-                className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-xs text-fg outline-none transition-colors placeholder:text-fg-dim focus:border-green/50"
+                className="mm-input mt-1 w-full px-2.5 py-1.5 font-mono text-[11px]"
               />
             </label>
-            <p className="mt-1.5 text-[10px] leading-relaxed text-fg-dim">
+            <p className="mt-1.5 text-[9px] leading-relaxed text-fg-dim">
               必须是「Web 服务」类型的 Key。推荐地点、坐标、人均、营业时间都靠它实时查，
               没有它就只能停在配置页，不会生成任何猜测结果。
             </p>
@@ -329,7 +331,7 @@ export default function SettingsPanel() {
               type="button"
               onClick={() => void testMap()}
               disabled={busy !== "none"}
-              className="mt-2 rounded-lg border border-line px-2.5 py-1.5 text-[11px] text-fg-muted transition-colors hover:text-fg disabled:opacity-50"
+              className="mm-btn-ghost mt-2 h-7 px-2.5 text-[10px]"
             >
               {busy === "map" ? "检测中…" : "测试地图"}
             </button>
@@ -337,25 +339,21 @@ export default function SettingsPanel() {
           </div>
 
           <div className="mt-3 flex items-center gap-2">
-            <button
-              type="button"
-              onClick={save}
-              className="flex-1 rounded-lg bg-green px-3 py-2 text-xs font-medium text-black transition-opacity hover:opacity-90"
-            >
+            <button type="button" onClick={save} className="mm-btn-primary h-9 flex-1 text-[11.5px]">
               保存
             </button>
             <button
               type="button"
               onClick={remove}
-              className="rounded-lg border border-line px-3 py-2 text-xs text-fg-dim transition-colors hover:text-red-300"
+              className="mm-btn-ghost h-9 px-3 text-[11px] hover:border-red-200 hover:text-red-500"
             >
               清除
             </button>
           </div>
 
-          {saveNote && <p className="mt-2 text-[11px] text-green">{saveNote}</p>}
+          {saveNote && <p className="mt-2 text-[10px] text-emerald-600">{saveNote}</p>}
 
-          <p className="mt-3 border-t border-line pt-2 text-[10px] leading-relaxed text-fg-dim">
+          <p className="mt-2.5 border-t border-line pt-2 text-[9px] leading-relaxed text-fg-dim">
             这一版没有预设兜底：不填 Key 就不会生成方案，避免出现看着像结论的假数据。
           </p>
         </div>
@@ -366,12 +364,16 @@ export default function SettingsPanel() {
 
 function DiagBox({ diag, compact }: { diag: Diag; compact?: boolean }) {
   const tone = diag.ok
-    ? "border-green/30 bg-green/[0.06]"
-    : "border-amber-400/30 bg-amber-400/[0.06]";
+    ? "border-emerald-200 bg-emerald-50/70"
+    : "border-amber-200 bg-amber-50/70";
 
   return (
     <div className={`mt-2 rounded-lg border p-2.5 ${tone}`}>
-      <p className={`text-[11px] font-medium ${diag.ok ? "text-green" : "text-amber-300"}`}>
+      <p
+        className={`text-[10px] font-medium ${
+          diag.ok ? "text-emerald-600" : "text-amber-700"
+        }`}
+      >
         {diag.ok
           ? compact
             ? `连接成功 · 检索到 ${diag.count ?? 0} 个地点${diag.latencyMs ? ` · ${diag.latencyMs}ms` : ""}`
@@ -380,25 +382,23 @@ function DiagBox({ diag, compact }: { diag: Diag; compact?: boolean }) {
       </p>
 
       {diag.ok && diag.sample && (
-        <p className="mt-1 text-[10px] leading-relaxed text-fg-dim">
+        <p className="mt-1 text-[9px] leading-relaxed text-fg-dim">
           {compact ? `样例：${diag.sample}` : `返回：${diag.sample}`}
         </p>
       )}
 
       {!diag.ok && diag.detail && (
-        <p className="mt-1 break-words rounded bg-black/35 px-2 py-1.5 font-mono text-[10px] leading-relaxed text-fg-muted">
+        <p className="mt-1 break-words rounded bg-white/80 px-2 py-1.5 font-mono text-[9px] leading-relaxed text-fg-muted">
           {diag.detail}
         </p>
       )}
 
-      {diag.hint && (
-        <p className="mt-1 text-[10px] leading-relaxed text-fg-muted">{diag.hint}</p>
-      )}
+      {diag.hint && <p className="mt-1 text-[9px] leading-relaxed text-fg-muted">{diag.hint}</p>}
 
       {Boolean(diag.warnings?.length) && (
         <ul className="mt-1.5 space-y-0.5">
           {diag.warnings!.map((w) => (
-            <li key={w} className="text-[10px] leading-relaxed text-amber-300/90">
+            <li key={w} className="text-[9px] leading-relaxed text-amber-600">
               · {w}
             </li>
           ))}
@@ -406,7 +406,7 @@ function DiagBox({ diag, compact }: { diag: Diag; compact?: boolean }) {
       )}
 
       {diag.endpoint && (
-        <p className="mt-1.5 break-all font-mono text-[9px] leading-relaxed text-fg-dim">
+        <p className="mt-1.5 break-all font-mono text-[8.5px] leading-relaxed text-fg-dim">
           请求：{diag.endpoint}
         </p>
       )}

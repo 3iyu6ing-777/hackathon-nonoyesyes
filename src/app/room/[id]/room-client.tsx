@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import TileMap, { type MapLine, type MapPoint } from "@/components/tile-map";
-import { Icon } from "@/components/icons";
+import TileMap, { type MapApi, type MapLine, type MapPoint } from "@/components/tile-map";
+import SiteHeader from "@/components/site-header";
+import { ActivityArt, Icon } from "@/components/icons";
 import { KEY_EVENT, loadApiConfig, openSettings } from "@/lib/api-key";
 import {
   loadRoom,
@@ -42,6 +43,8 @@ const LOADING_STEPS = [
   "正在算每人打车和坐地铁分别要多久、多少钱…",
 ];
 
+const QUICK_ASKS = ["这家店人均多少？", "附近有地铁吗？", "需要提前预约吗？"];
+
 function fmtMin(s: number | null) {
   if (s == null) return "";
   return `${Math.max(1, Math.round(s / 60))} 分钟`;
@@ -50,6 +53,17 @@ function fmtMin(s: number | null) {
 function fmtFare(f: number | null | undefined) {
   if (f == null) return "";
   return f === 0 ? "免费" : `¥${Math.round(f)}`;
+}
+
+function AiAvatar({ size = 24 }: { size?: number }) {
+  return (
+    <span
+      className="flex shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#7cb8ff] to-[#2563eb] text-white shadow-[0_5px_12px_-7px_rgba(37,99,235,0.95)]"
+      style={{ width: size, height: size }}
+    >
+      <Icon name="sparkles" size={Math.round(size * 0.56)} strokeWidth={1.7} />
+    </span>
+  );
 }
 
 export default function RoomClient({ roomId }: { roomId: string }) {
@@ -75,18 +89,26 @@ export default function RoomClient({ roomId }: { roomId: string }) {
   const [placeBusy, setPlaceBusy] = useState(false);
   const [placeErr, setPlaceErr] = useState("");
   const [rerouting, setRerouting] = useState(false);
+  const [legend, setLegend] = useState(true);
+  const [detailOpen, setDetailOpen] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  // 对话区自己的滚动容器：只让这一块滚，不要让整页跟着滚
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const mapApi = useRef<MapApi | null>(null);
   const nextId = useRef(1);
   const reqId = useRef(0);
 
+  const room = useMemo(() => loadRoom(roomId), [roomId]);
+  const roomTitle = room.title ?? "周末出去玩";
+
   const chatText = useMemo(() => {
-    const room = loadRoom(roomId);
-    return room.chat && room.chat.trim().length >= 10 ? room.chat : SAMPLE_CHAT;
+    const r = loadRoom(roomId);
+    return r.chat && r.chat.trim().length >= 10 ? r.chat : SAMPLE_CHAT;
   }, [roomId]);
 
   useEffect(() => {
-    const room = loadRoom(roomId);
-    setDemo(!(room.chat && room.chat.trim().length >= 10));
+    const r = loadRoom(roomId);
+    setDemo(!(r.chat && r.chat.trim().length >= 10));
   }, [roomId]);
 
   const overrideList = useMemo(
@@ -115,13 +137,14 @@ export default function RoomClient({ roomId }: { roomId: string }) {
       setPhase("loading");
       setTick(0);
       try {
-        const room = loadRoom(roomId);
+        const r = loadRoom(roomId);
         const res = await fetch("/api/plan", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             chat: chatText,
-            activityId: room.activityId ?? "food",
+            activityId: r.activityId ?? "food",
+            customActivity: r.customActivity ?? "",
             origin: myPlace,
             config: cfg,
             amapKey: cfg.amapKey,
@@ -176,7 +199,9 @@ export default function RoomClient({ roomId }: { roomId: string }) {
   }, [phase]);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    // 只滚对话容器。用 scrollIntoView 会连带把整个窗口滚下去。
+    const box = scrollRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
   }, [bubbles, chatting]);
 
   const mapPoints = useMemo<MapPoint[]>(() => {
@@ -264,6 +289,7 @@ export default function RoomClient({ roomId }: { roomId: string }) {
           })),
           config: cfg,
           amapKey: cfg.amapKey,
+          city: plan.trace.city,
         }),
       });
       const data = (await res.json()) as {
@@ -310,7 +336,7 @@ export default function RoomClient({ roomId }: { roomId: string }) {
       const res = await fetch("/api/geocode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q, amapKey: cfg.amapKey }),
+        body: JSON.stringify({ q, amapKey: cfg.amapKey, city: plan?.trace.city }),
       });
       const data = (await res.json()) as {
         ok?: boolean;
@@ -349,7 +375,7 @@ export default function RoomClient({ roomId }: { roomId: string }) {
       const res = await fetch("/api/places", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q, amapKey: cfg.amapKey }),
+        body: JSON.stringify({ q, amapKey: cfg.amapKey, city: plan?.trace.city }),
       });
       const data = (await res.json()) as {
         ok?: boolean;
@@ -370,7 +396,7 @@ export default function RoomClient({ roomId }: { roomId: string }) {
       const res2 = await fetch("/api/geocode", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q, amapKey: cfg.amapKey }),
+        body: JSON.stringify({ q, amapKey: cfg.amapKey, city: plan?.trace.city }),
       });
       const data2 = (await res2.json()) as {
         ok?: boolean;
@@ -401,7 +427,7 @@ export default function RoomClient({ roomId }: { roomId: string }) {
       return;
     }
 
-    const room = loadRoom(roomId);
+    const r = loadRoom(roomId);
     setBubbles((prev) => [...prev, { id: nextId.current++, role: "user", text }]);
     setDraft("");
     setChatting(true);
@@ -415,12 +441,14 @@ export default function RoomClient({ roomId }: { roomId: string }) {
           message: text,
           history: bubbles.slice(-6).map((b) => ({ role: b.role, text: b.text })),
           plan,
-          activityId: room.activityId ?? "food",
+          activityId: r.activityId ?? "food",
+          customActivity: r.customActivity ?? "",
           origin: myPlace,
           config: cfg,
           amapKey: cfg.amapKey,
           previousConstraints: plan?.hardConstraints ?? [],
           memberOverrides: overrideList,
+          city: plan?.trace.city,
         }),
       });
       const data = (await res.json()) as {
@@ -465,165 +493,259 @@ export default function RoomClient({ roomId }: { roomId: string }) {
   }
 
   const memberCount = plan?.members.length ?? null;
+  const spotName = plan?.pick?.name;
+
+  const status =
+    rerouting
+      ? { text: "重新检索中", cls: "bg-amber-50 text-amber-600", dot: "bg-amber-500" }
+      : phase === "ready"
+        ? { text: "方案已生成", cls: "bg-emerald-50 text-emerald-600", dot: "bg-emerald-500" }
+        : phase === "error"
+          ? { text: "出错了", cls: "bg-amber-50 text-amber-600", dot: "bg-amber-500" }
+          : phase === "nokey"
+            ? { text: "待配置 Key", cls: "bg-surface-2 text-fg-muted", dot: "bg-slate-300" }
+            : { text: "分析中", cls: "bg-brand-soft text-brand", dot: "bg-brand animate-pulse" };
 
   return (
-    <div className="flex flex-1 flex-col">
-      <header className="border-b border-line px-5 py-4">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <span className="text-base font-medium">MeetMate AI</span>
-            <p className="mt-1 truncate text-xs text-fg-muted">
-              房间 ID：<span className="font-mono">{roomId}</span>
-              {memberCount ? ` · ${memberCount} 位成员` : ""}
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {demo && (
-              <span className="rounded-full bg-amber-400/12 px-3 py-1 text-xs text-amber-300">
-                演示群聊
-              </span>
-            )}
-            <span
-              className={`rounded-full px-3 py-1 text-xs ${
-                phase === "ready"
-                  ? "bg-green/12 text-green"
-                  : phase === "error"
-                    ? "bg-amber-400/12 text-amber-300"
-                    : "bg-white/6 text-fg-muted"
-              }`}
-            >
-              {rerouting
-                ? "重新检索中"
-                : phase === "ready"
-                  ? "方案已生成"
-                  : phase === "error"
-                    ? "出错了"
-                    : phase === "nokey"
-                      ? "待配置"
-                      : "分析中"}
-            </span>
-          </div>
-        </div>
-      </header>
+    // 任何宽度都锁成一屏：页头 + 房间条 + 内容区，余下高度分给左右两块面板，
+    // 各自内部滚动，整页永远不出现滚动条
+    <div className="flex h-dvh min-h-0 flex-col overflow-hidden">
+      <SiteHeader active="room" />
 
-      <div className="mx-auto grid w-full max-w-6xl flex-1 gap-4 px-5 py-5 lg:grid-cols-2">
-        <section className="flex min-h-[460px] flex-col rounded-2xl border border-line bg-surface lg:min-h-[600px]">
-          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-3">
-            <h1 className="text-base font-semibold">AI 组局助手</h1>
-            <div className="flex flex-wrap items-center justify-end gap-1.5">
-              <span className="text-[10px] text-fg-dim">我的出发地</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setMyOpen((v) => !v);
-                  setMyErr("");
-                }}
-                title="只在群聊里一个人都没读到出发地时兜底；成员的位置始终以群聊为准"
-                className="rounded-md border border-line px-2 py-1 text-[11px] text-fg-muted transition-colors hover:text-fg"
-              >
-                {myPlace ? myPlace.name : "未设置（可选）"}
-              </button>
-              {myPlace && (
+      <div className="mx-auto w-full max-w-[1240px] shrink-0 overflow-hidden px-3 pt-2.5 sm:px-5">
+        <div className="mm-card flex items-center gap-2 px-3 py-2">
+          <AiAvatar size={26} />
+          <span className="truncate text-[13.5px] font-semibold">{roomTitle}</span>
+          <span className="hidden shrink-0 text-[10.5px] text-fg-dim sm:inline">
+            房间 ID <span className="font-mono text-fg-muted">#{roomId}</span>
+          </span>
+          {memberCount ? (
+            <span className="mm-chip shrink-0">
+              <Icon name="users" size={11} />
+              {memberCount} 人
+            </span>
+          ) : null}
+          {demo && (
+            <span className="hidden shrink-0 rounded-full bg-amber-50 px-2 py-0.5 text-[10.5px] text-amber-600 sm:inline">
+              演示群聊
+            </span>
+          )}
+
+          <span
+            className={`ml-auto hidden shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[10.5px] sm:flex ${status.cls}`}
+          >
+            <span className={`h-1.5 w-1.5 rounded-full ${status.dot}`} />
+            {status.text}
+          </span>
+
+          <Link
+            href={`/room/${roomId}/chat`}
+            className="mm-btn-ghost h-7 shrink-0 px-2.5 text-[10.5px]"
+          >
+            <Icon name="chat" size={12} />
+            修改群聊
+          </Link>
+        </div>
+      </div>
+
+      {/* 窄屏：上下两块按比例分高度；宽屏：左右两栏 */}
+      <div className="mx-auto grid w-full max-w-[1240px] min-h-0 flex-1 grid-rows-[minmax(0,1.55fr)_minmax(0,1fr)] gap-2.5 px-3 py-2.5 sm:px-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.08fr)] lg:grid-rows-1">
+        {/* 左：AI 目的地助手 */}
+        <section className="mm-card flex min-h-0 min-w-0 flex-col overflow-hidden">
+          <div className="flex shrink-0 items-center gap-2 border-b border-line px-3 py-2">
+            <AiAvatar size={28} />
+            <div className="min-w-0">
+              <h1 className="truncate text-[13.5px] font-semibold">AI 目的地助手</h1>
+              <p className="truncate text-[10px] text-fg-dim">
+                想了解推荐地点的更多信息？随时问我。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setMyOpen((v) => !v)}
+              title="只在群聊里一个人都没读到出发地时兜底；成员的位置始终以群聊为准"
+              className="mm-btn-ghost ml-auto h-7 shrink-0 px-2.5 text-[10px]"
+            >
+              <Icon name="pin" size={11} />
+              {myPlace ? myPlace.name : "我的出发地"}
+            </button>
+          </div>
+
+          {myOpen && (
+            <div className="shrink-0 border-b border-line bg-[#fbfdff] px-3 py-2">
+              <div className="flex items-center gap-2">
+                <input
+                  value={myQuery}
+                  onChange={(e) => setMyQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                      void applyMyPlace();
+                    }
+                  }}
+                  placeholder="输入地名，如「文三路」"
+                  className="mm-input h-8 min-w-0 flex-1 px-2.5 text-[11px]"
+                />
                 <button
                   type="button"
-                  onClick={() => setMyPlace(null)}
-                  className="text-[10px] text-fg-dim underline underline-offset-2 transition-colors hover:text-fg-muted"
+                  disabled={myBusy}
+                  onClick={() => void applyMyPlace()}
+                  className="mm-btn-primary h-8 shrink-0 px-3 text-[11px]"
                 >
-                  清除
+                  {myBusy ? "解析中" : "确定"}
                 </button>
-              )}
-              {myOpen && (
-                <div className="flex w-full items-center justify-end gap-1.5">
-                  <input
-                    value={myQuery}
-                    onChange={(e) => setMyQuery(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.nativeEvent.isComposing) {
-                        void applyMyPlace();
-                      }
-                    }}
-                    placeholder="输入地名，如「文三路」"
-                    className="h-7 w-40 rounded-md border border-line bg-surface px-2 text-[11px] outline-none placeholder:text-fg-dim focus:border-green/40"
-                  />
+                {myPlace && (
                   <button
                     type="button"
-                    disabled={myBusy}
-                    onClick={() => void applyMyPlace()}
-                    className="rounded-md border border-line px-2 py-1 text-[10px] text-fg-muted transition-colors hover:text-fg disabled:opacity-40"
+                    onClick={() => {
+                      setMyPlace(null);
+                      setMyOpen(false);
+                    }}
+                    className="shrink-0 text-[10px] text-fg-dim underline underline-offset-2 hover:text-fg-muted"
                   >
-                    {myBusy ? "解析中" : "确定"}
+                    清除
                   </button>
-                </div>
-              )}
-              {myErr && (
-                <p className="w-full text-right text-[10px] text-amber-300">
-                  {myErr}
-                </p>
-              )}
+                )}
+              </div>
+              <p className="mt-1 text-[10px] leading-relaxed text-fg-dim">
+                {myErr ? (
+                  <span className="text-amber-600">{myErr}</span>
+                ) : (
+                  "只在群里一个人都没读到位置时兜底，不覆盖成员自己说的出发地。"
+                )}
+              </p>
             </div>
-          </div>
+          )}
 
-          <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
+          <div
+            ref={scrollRef}
+            className="mm-scroll min-h-0 flex-1 space-y-2.5 overflow-y-auto overscroll-contain px-3 py-2.5"
+          >
             {phase === "nokey" && <NoKeyCard />}
             {phase === "loading" && <LoadingCard text={LOADING_STEPS[tick]} />}
             {phase === "error" && <ErrorCard err={err} onRetry={() => void run()} />}
 
             {plan && (phase === "ready" || rerouting) && (
               <>
-                <RequirementCard plan={plan} />
-                <MemberPanel
+                <PlaceCard
                   plan={plan}
-                  editing={editing}
-                  placeQuery={placeQuery}
-                  placeOptions={placeOptions}
-                  placeBusy={placeBusy}
-                  placeErr={placeErr}
-                  rerouting={rerouting}
-                  onEdit={(name) => {
-                    setEditing(editing === name ? null : name);
-                    setPlaceQuery("");
-                    setPlaceOptions([]);
-                    setPlaceErr("");
-                  }}
-                  onQuery={setPlaceQuery}
-                  onSearch={(name) => void searchPlace(name)}
-                  onPick={(name, o) => void applyOrigin(name, o.name, o.lat, o.lng)}
+                  onLocate={() => mapApi.current?.fitSpot()}
                 />
-                <NeedPanel plan={plan} />
-                <PickCard plan={plan} />
-                <RankingCard plan={plan} />
+
+                <div className="overflow-hidden rounded-[13px] border border-line bg-[#fbfdff]">
+                  <button
+                    type="button"
+                    onClick={() => setDetailOpen((v) => !v)}
+                    className="flex w-full items-center gap-1.5 px-3 py-2 text-left text-[11px] text-fg-muted transition-colors hover:text-fg"
+                  >
+                    <Icon name="layers" size={12} className="text-brand" />
+                    方案细节：读到的条件 / 每个人位置 / 逐条核对 / 备选榜单
+                    <Icon
+                      name="chevron-down"
+                      size={12}
+                      className={`ml-auto shrink-0 transition-transform ${
+                        detailOpen ? "rotate-180" : ""
+                      }`}
+                    />
+                  </button>
+                  {detailOpen && (
+                    <div className="space-y-2.5 px-2.5 pb-2.5">
+                      <RequirementCard plan={plan} />
+                      <MemberPanel
+                        plan={plan}
+                        editing={editing}
+                        placeQuery={placeQuery}
+                        placeOptions={placeOptions}
+                        placeBusy={placeBusy}
+                        placeErr={placeErr}
+                        rerouting={rerouting}
+                        onEdit={(name) => {
+                          setEditing(editing === name ? null : name);
+                          setPlaceQuery("");
+                          setPlaceOptions([]);
+                          setPlaceErr("");
+                        }}
+                        onQuery={setPlaceQuery}
+                        onSearch={(name) => void searchPlace(name)}
+                        onPick={(name, o) => void applyOrigin(name, o.name, o.lat, o.lng)}
+                      />
+                      <NeedPanel plan={plan} />
+                      <RankingCard plan={plan} />
+                    </div>
+                  )}
+                </div>
+
+                {bubbles.length === 0 && (
+                  <>
+                    <div className="flex items-start gap-1.5">
+                      <span className="mt-0.5">
+                        <AiAvatar size={24} />
+                      </span>
+                      <p className="max-w-[86%] rounded-2xl rounded-tl-md border border-line bg-white px-3 py-2 text-[12px] leading-relaxed text-fg shadow-[0_6px_16px_-14px_rgba(15,23,42,0.5)]">
+                        我从群聊里读到 {plan.members.length} 个人的出发地、
+                        {plan.needs.length} 条要求，先按这些筛出了「{plan.pick?.name ?? "首选"}」。
+                        关于这家店的细节，可以直接问我。
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5 pl-[30px]">
+                      <span className="text-[9.5px] text-fg-dim">可以这样问：</span>
+                      {QUICK_ASKS.map((q) => (
+                        <button
+                          key={q}
+                          type="button"
+                          onClick={() => setDraft(q)}
+                          className="rounded-full border border-line bg-white px-2 py-0.5 text-[10px] text-fg-muted transition-colors hover:border-brand/40 hover:text-brand"
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
               </>
             )}
 
             {bubbles.map((b) =>
               b.role === "user" ? (
-                <div key={b.id} className="flex justify-end">
-                  <p className="max-w-[85%] rounded-2xl rounded-br-md bg-surface-2 px-4 py-2.5 text-sm leading-relaxed">
+                <div key={b.id} className="mm-in flex items-start justify-end gap-1.5">
+                  <p className="max-w-[82%] rounded-2xl rounded-br-md bg-[#e8f0fe] px-3 py-2 text-[12px] leading-relaxed text-[#1e3a8a]">
                     {b.text}
                   </p>
+                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-line bg-white text-fg-dim">
+                    <Icon name="users" size={12} />
+                  </span>
                 </div>
               ) : (
-                <div key={b.id} className="space-y-1.5">
-                  <p className="text-xs text-fg-dim">MeetMate AI</p>
-                  <p className="text-sm leading-relaxed">{b.text}</p>
-                  {b.updated && (
-                    <p className="text-[11px] text-green">已重新检索并更新上面的方案</p>
-                  )}
+                <div key={b.id} className="mm-in flex items-start gap-1.5">
+                  <span className="mt-0.5">
+                    <AiAvatar size={24} />
+                  </span>
+                  <div className="min-w-0 max-w-[86%]">
+                    <p className="rounded-2xl rounded-tl-md border border-line bg-white px-3 py-2 text-[12px] leading-relaxed text-fg shadow-[0_6px_16px_-14px_rgba(15,23,42,0.5)]">
+                      {b.text}
+                    </p>
+                    {b.updated && (
+                      <p className="mt-1 flex items-center gap-1 text-[10px] text-emerald-600">
+                        <Icon name="check" size={10} strokeWidth={2.6} />
+                        已重新检索并更新上面的方案
+                      </p>
+                    )}
+                  </div>
                 </div>
               )
             )}
 
             {chatting && (
-              <p className="flex items-center gap-2 text-[11px] text-fg-dim">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green" />
+              <div className="flex items-center gap-1.5 text-[10.5px] text-fg-dim">
+                <AiAvatar size={20} />
                 正在理解你的新要求…
-              </p>
+              </div>
             )}
             <div ref={endRef} />
           </div>
 
-          <div className="border-t border-line p-3">
-            <div className="flex items-end gap-2 rounded-xl border border-line bg-bg/60 p-2">
+          <div className="shrink-0 border-t border-line p-2">
+            <div className="flex items-center gap-1.5 rounded-full border border-line bg-surface-2 py-1 pl-3 pr-1 transition-colors focus-within:border-[#b9cffb] focus-within:bg-white">
+              <Icon name="sparkles" size={13} className="shrink-0 text-brand/70" />
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
@@ -632,75 +754,155 @@ export default function RoomClient({ roomId }: { roomId: string }) {
                 }}
                 placeholder={
                   phase === "ready"
-                    ? "提新要求，比如「人均降到 50」"
+                    ? "询问目的地详情，例如价格、交通、营业时间…"
                     : "先配置 Key 才能对话"
                 }
                 disabled={phase === "nokey"}
-                className="h-9 flex-1 bg-transparent px-2 text-sm outline-none placeholder:text-fg-dim disabled:cursor-not-allowed"
+                className="h-7 min-w-0 flex-1 bg-transparent text-[12px] outline-none placeholder:text-fg-dim disabled:cursor-not-allowed"
               />
               <button
                 type="button"
                 onClick={() => void send()}
                 disabled={chatting || phase === "nokey"}
                 aria-label="发送"
-                className="flex h-9 w-9 items-center justify-center rounded-lg bg-surface-2 text-fg-muted transition-colors hover:bg-white/10 hover:text-fg disabled:opacity-40"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-b from-[#3f8bfb] to-[#2563eb] text-white shadow-[0_6px_14px_-8px_rgba(37,99,235,0.9)] transition-opacity disabled:opacity-40"
               >
-                <Icon name="send" size={16} />
+                <Icon name="send" size={13} strokeWidth={1.9} />
               </button>
             </div>
           </div>
         </section>
 
-        <section className="flex min-h-[460px] flex-col rounded-2xl border border-line bg-surface">
-          <div className="flex items-center justify-between gap-3 border-b border-line px-5 py-3">
-            <h2 className="text-base font-semibold">聚会地图</h2>
-            <span className="rounded-full bg-white/5 px-2.5 py-0.5 text-[11px] text-fg-dim">
-              可拖拽 · 滚轮缩放
+        {/* 右：地图 */}
+        <section className="mm-card flex min-h-0 min-w-0 flex-col overflow-hidden">
+          <div className="flex shrink-0 items-center gap-2 px-3 pb-1 pt-2">
+            <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-brand-soft text-brand">
+              <Icon name="map" size={13} />
             </span>
+            <div className="min-w-0">
+              <h2 className="text-[13.5px] font-semibold">聚会地图</h2>
+              <p className="truncate text-[10px] text-fg-dim">
+                {spotName ? `AI 推荐：${spotName}` : "查看所有成员位置与推荐目的地"}
+              </p>
+            </div>
           </div>
-          <div className="relative flex-1 overflow-hidden rounded-b-2xl">
-            <TileMap points={mapPoints} lines={mapLines} />
+
+          <div className="mm-scroll flex shrink-0 items-center gap-1.5 overflow-x-auto px-2.5 py-1.5">
+            <MapTool icon="zoom-in" label="放大" onClick={() => mapApi.current?.zoomIn()} />
+            <MapTool icon="zoom-out" label="缩小" onClick={() => mapApi.current?.zoomOut()} />
+            <MapTool
+              icon="target"
+              label="定位到推荐地点"
+              onClick={() => mapApi.current?.fitSpot()}
+            />
+            <MapTool
+              icon="users"
+              label="显示全部成员"
+              onClick={() => mapApi.current?.fitMembers()}
+            />
+            <MapTool
+              icon="info"
+              label="图例说明"
+              onClick={() => setLegend((v) => !v)}
+              active={legend}
+            />
+          </div>
+
+          <div className="relative mx-2 mb-2 min-h-0 flex-1 overflow-hidden rounded-[14px] border border-line bg-[#eef4fb]">
+            <TileMap points={mapPoints} lines={mapLines} apiRef={mapApi} />
+
+            {legend && (
+              <div className="pointer-events-none absolute bottom-2 left-2 z-[450] hidden w-[126px] sm:block rounded-[10px] border border-line bg-white/95 p-2 shadow-[0_10px_24px_-16px_rgba(15,23,42,0.6)] backdrop-blur">
+                <p className="text-[9.5px] font-semibold text-fg-muted">图例</p>
+                <ul className="mt-1 space-y-1">
+                  <li className="flex items-center gap-1.5 text-[9.5px] text-fg-muted">
+                    <span className="flex h-2.5 w-2.5 items-center justify-center rounded-full bg-brand">
+                      <span className="h-1 w-1 rounded-full bg-white" />
+                    </span>
+                    AI 推荐目的地
+                  </li>
+                  <li className="flex items-center gap-1.5 text-[9.5px] text-fg-muted">
+                    <span className="flex gap-0.5">
+                      <span className="h-2 w-2 rounded-full bg-[#60a5fa]" />
+                      <span className="h-2 w-2 rounded-full bg-[#f472b6]" />
+                      <span className="h-2 w-2 rounded-full bg-[#fbbf24]" />
+                    </span>
+                    成员出发地
+                  </li>
+                  <li className="flex items-center gap-1.5 text-[9.5px] text-fg-muted">
+                    <span className="h-2 w-2 rounded-full bg-[#a8b6cc]" />
+                    其他候选
+                  </li>
+                  <li className="flex items-center gap-1.5 text-[9.5px] text-fg-muted">
+                    <span className="h-[2px] w-4 rounded-full bg-[#60a5fa]" />
+                    实线打车 / 虚线地铁
+                  </li>
+                </ul>
+              </div>
+            )}
+
+            <div className="pointer-events-none absolute bottom-2 right-2 z-[450] hidden max-w-[230px] items-start gap-1.5 rounded-[10px] bg-white/92 px-2 py-1.5 text-[9.5px] leading-relaxed text-fg-muted shadow-[0_10px_24px_-18px_rgba(15,23,42,0.6)] backdrop-blur sm:flex">
+              <Icon name="info" size={10} className="mt-[2px] shrink-0 text-brand/70" />
+              位置、路线与时间来自高德实时接口。某个人的位置不对，可在左侧「方案细节」里改。
+            </div>
+
             {rerouting && (
-              <div className="pointer-events-none absolute inset-0 z-[600] flex items-center justify-center bg-black/40 backdrop-blur-[1px]">
-                <span className="rounded-full bg-black/70 px-3 py-1.5 text-[11px] text-fg-muted">
-                  正在按新位置重新检索地点并重算路程…
+              <div className="absolute inset-0 z-[600] flex items-center justify-center bg-white/55 backdrop-blur-[1px]">
+                <span className="flex items-center gap-2 rounded-full bg-white px-3 py-1.5 text-[10.5px] text-fg-muted shadow-lg">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
+                  按新位置重新检索地点并重算路程…
                 </span>
               </div>
             )}
           </div>
         </section>
       </div>
-
-      <div className="mx-auto w-full max-w-6xl px-5 pb-6">
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-xs text-fg-dim">
-          <span>
-            条件与取舍理由由 AI 写，地点、路程、地铁票价、打车费全部来自高德实时接口；
-            打车费按杭州起步价估算，人均与营业时间以商户实际为准。
-          </span>
-          <Link
-            href={`/room/${roomId}/chat`}
-            className="text-fg-muted underline underline-offset-4 hover:text-fg"
-          >
-            修改群聊
-          </Link>
-        </div>
-      </div>
     </div>
+  );
+}
+
+function MapTool({
+  icon,
+  label,
+  onClick,
+  active,
+}: {
+  icon: "zoom-in" | "zoom-out" | "target" | "users" | "info";
+  label: string;
+  onClick: () => void;
+  active?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex h-6 shrink-0 items-center gap-1 rounded-full border px-2 text-[10px] transition-colors ${
+        active
+          ? "border-brand/30 bg-brand-soft text-brand"
+          : "border-line bg-white text-fg-muted hover:border-[#cfdff9] hover:text-brand"
+      }`}
+    >
+      <Icon name={icon} size={11} />
+      {label}
+    </button>
   );
 }
 
 function NoKeyCard() {
   return (
-    <div className="rounded-xl border border-dashed border-green/30 bg-green/[0.05] p-4">
-      <p className="text-sm font-medium">需要先配一个 AI Key</p>
-      <p className="mt-1.5 text-xs leading-relaxed text-fg-muted">
-        这一版不再用任何预设数据：每个人的条件、地点、路程全部实时算。
-        填上你自己的 Key，点左下角齿轮即可；Key 只存在你这台浏览器里。
+    <div className="rounded-[14px] border border-brand/25 bg-brand-soft/60 p-3">
+      <p className="flex items-center gap-1.5 text-[12.5px] font-semibold text-brand">
+        <Icon name="key" size={13} />
+        需要先配一个 AI Key
+      </p>
+      <p className="mt-1.5 text-[11px] leading-relaxed text-fg-muted">
+        这一版不用任何预设数据：每个人的条件、地点、路程全部实时算。
+        填上你自己的 Key 就行，Key 只存在你这台浏览器里。
       </p>
       <button
         type="button"
         onClick={openSettings}
-        className="mt-3 rounded-lg bg-green px-3 py-1.5 text-xs font-medium text-black transition-opacity hover:opacity-90"
+        className="mm-btn-primary mt-2.5 h-8 px-3.5 text-[11px]"
       >
         去配置 Key
       </button>
@@ -710,17 +912,17 @@ function NoKeyCard() {
 
 function LoadingCard({ text }: { text: string }) {
   return (
-    <div className="rounded-xl border border-line bg-bg/40 p-4">
+    <div className="rounded-[14px] border border-line bg-white p-3">
       <div className="flex items-center gap-2">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green" />
-        <span className="text-xs text-fg-muted">{text}</span>
+        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />
+        <span className="text-[11.5px] text-fg-muted">{text}</span>
       </div>
-      <div className="mt-3 space-y-2">
-        <div className="h-2.5 w-4/5 animate-pulse rounded bg-white/6" />
-        <div className="h-2.5 w-3/5 animate-pulse rounded bg-white/6" />
-        <div className="h-2.5 w-2/3 animate-pulse rounded bg-white/6" />
+      <div className="mt-2.5 space-y-1.5">
+        <div className="h-2.5 w-4/5 animate-pulse rounded bg-[#eef3fc]" />
+        <div className="h-2.5 w-3/5 animate-pulse rounded bg-[#eef3fc]" />
+        <div className="h-2.5 w-2/3 animate-pulse rounded bg-[#eef3fc]" />
       </div>
-      <p className="mt-3 text-[11px] text-fg-dim">
+      <p className="mt-2 text-[10px] text-fg-dim">
         成员越多，要算的路程越多，通常 10–20 秒。
       </p>
     </div>
@@ -730,28 +932,24 @@ function LoadingCard({ text }: { text: string }) {
 function ErrorCard({ err, onRetry }: { err: ApiError | null; onRetry: () => void }) {
   const needsKey = err?.code === "NO_KEY" || err?.code === "AUTH";
   return (
-    <div className="rounded-xl border border-amber-400/30 bg-amber-400/[0.06] p-4">
-      <p className="text-sm font-medium text-amber-300">
+    <div className="rounded-[14px] border border-amber-200 bg-amber-50/70 p-3">
+      <p className="text-[12.5px] font-semibold text-amber-700">
         {err?.error ?? "分析失败"}
       </p>
       {err?.detail && (
-        <p className="mt-1.5 break-words rounded-lg bg-black/30 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-fg-muted">
+        <p className="mt-1.5 break-words rounded-lg bg-white/70 px-2 py-1.5 font-mono text-[10px] leading-relaxed text-fg-muted">
           {err.detail}
         </p>
       )}
-      <div className="mt-3 flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={onRetry}
-          className="rounded-lg border border-line px-3 py-1.5 text-xs text-fg-muted transition-colors hover:text-fg"
-        >
+      <div className="mt-2.5 flex flex-wrap gap-1.5">
+        <button type="button" onClick={onRetry} className="mm-btn-ghost h-7 px-2.5 text-[10.5px]">
           重试
         </button>
         {needsKey && (
           <button
             type="button"
             onClick={openSettings}
-            className="rounded-lg bg-green px-3 py-1.5 text-xs font-medium text-black transition-opacity hover:opacity-90"
+            className="mm-btn-primary h-7 px-3 text-[10.5px]"
           >
             去检查 Key
           </button>
@@ -761,53 +959,154 @@ function ErrorCard({ err, onRetry }: { err: ApiError | null; onRetry: () => void
   );
 }
 
+function PlaceCard({ plan, onLocate }: { plan: PlanResult; onLocate: () => void }) {
+  if (!plan.pick) return null;
+  const p = plan.pick;
+  const sc = p.score;
+  return (
+    <div className="mm-in overflow-hidden rounded-[15px] border border-line bg-white shadow-[0_12px_28px_-24px_rgba(15,23,42,0.7)]">
+      <div className="flex gap-2.5 p-2.5">
+        <div className="h-[72px] w-[82px] shrink-0 overflow-hidden rounded-[10px]">
+          <ActivityArt scene={plan.activityId} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start gap-1.5">
+            <p className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-tight">
+              {p.name}
+            </p>
+            <button
+              type="button"
+              onClick={onLocate}
+              className="mm-btn-ghost h-[22px] shrink-0 px-2 text-[9.5px]"
+            >
+              <Icon name="pin" size={9} />
+              查看地图
+            </button>
+          </div>
+          <p className="mt-1 flex items-center gap-1 text-[10px] text-fg-muted">
+            <Icon name="pin" size={9} className="shrink-0 text-fg-dim" />
+            <span className="truncate">{p.address || p.type || "地址未提供"}</span>
+          </p>
+          <p className="mt-0.5 flex items-center gap-1 text-[10px] text-fg-muted">
+            <Icon name="wallet" size={9} className="shrink-0 text-fg-dim" />
+            人均：{p.cost || "未标注"}
+            {p.rating ? ` · 评分 ${p.rating}` : ""}
+          </p>
+          <div className="mt-1 flex flex-wrap items-center gap-1">
+            {sc && (
+              <span className="rounded bg-emerald-50 px-1.5 py-[1px] text-[9.5px] text-emerald-600">
+                综合 {sc.score} 分
+              </span>
+            )}
+            <span className="rounded bg-brand-soft px-1.5 py-[1px] text-[9.5px] text-brand">
+              资料完整 {sc?.clarity ?? 100}%
+            </span>
+            {p.openTime && (
+              <span className="truncate text-[9.5px] text-fg-dim">营业 {p.openTime}</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="mx-2.5 rounded-[11px] bg-[#f6faff] p-2">
+        <p className="flex items-center gap-1 text-[9.5px] font-medium text-brand">
+          <Icon name="sparkles" size={10} />
+          推荐理由
+        </p>
+        <p className="mt-1 text-[10.5px] leading-relaxed text-fg-muted">{p.reason}</p>
+        {p.cautions.slice(0, 2).map((c) => (
+          <p key={c} className="mt-1 text-[10px] leading-relaxed text-amber-600">
+            注意：{c}
+          </p>
+        ))}
+        {p.cautions.length > 2 && (
+          <p className="mt-1 text-[10px] text-fg-dim">
+            还有 {p.cautions.length - 2} 条提醒，展开「方案细节」可看
+          </p>
+        )}
+      </div>
+
+      <div className="flex items-center gap-2 px-2.5 py-1.5 text-[9.5px] text-fg-dim">
+        {p.tel && (
+          <span className="flex items-center gap-1">
+            <Icon name="phone" size={9} />
+            {p.tel.split(";")[0]}
+          </span>
+        )}
+        {p.perMember.some((l) => l.durationS != null) && (
+          <span className="flex items-center gap-1">
+            <Icon name="clock" size={9} />
+            最远{" "}
+            {Math.max(
+              1,
+              Math.round(Math.max(...p.perMember.map((l) => l.durationS ?? 0)) / 60)
+            )}{" "}
+            分钟
+          </span>
+        )}
+        <span className="ml-auto min-w-0 max-w-[62%] truncate text-right">
+          {p.address || `${p.lat.toFixed(4)}, ${p.lng.toFixed(4)}`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+const VERDICT_STYLE: Record<
+  NeedCheck["verdict"],
+  { label: string; cls: string; dot: string }
+> = {
+  pass: { label: "满足", cls: "text-emerald-600", dot: "bg-emerald-500" },
+  conflict: { label: "违背", cls: "text-red-500", dot: "bg-red-400" },
+  unknown: { label: "待确认", cls: "text-fg-dim", dot: "bg-slate-300" },
+};
+
 function RequirementCard({ plan }: { plan: PlanResult }) {
   return (
-    <div className="rounded-xl border border-line bg-bg/40 p-4">
-      <div className="flex items-center justify-between">
-        <p className="text-xs text-fg-dim">
+    <div className="mm-card-flat p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[10px] text-fg-dim">
           从群聊读出的条件 · {plan.activityLabel}
         </p>
-        <span className="rounded-md bg-white/6 px-1.5 py-0.5 text-[10px] text-fg-dim">
+        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[9px] text-fg-dim">
           {plan.trace.model}
         </span>
       </div>
-      <ul className="mt-2.5 space-y-2 text-sm">
+      <ul className="mt-1.5 space-y-1">
         {plan.requirements.map((r) => (
-          <li key={r.label} className="flex gap-2 leading-relaxed">
-            <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-fg-muted" />
+          <li key={r.label} className="flex gap-1.5 text-[11px] leading-relaxed">
+            <span className="mt-[7px] h-1 w-1 shrink-0 rounded-full bg-brand/50" />
             <span>
-              <span className="text-fg-muted">{r.label}：</span>
+              <span className="text-fg-dim">{r.label}：</span>
               {r.value}
             </span>
           </li>
         ))}
       </ul>
 
-      {(plan.budget != null || plan.maxTravelMin != null) && (
-        <div className="mt-2.5 flex flex-wrap gap-1.5">
-          {plan.budget != null && (
-            <span className="rounded-md bg-green/10 px-2 py-0.5 text-[11px] text-green">
-              人均上限 ¥{plan.budget}
-            </span>
-          )}
-          {plan.maxTravelMin != null && (
-            <span className="rounded-md bg-white/6 px-2 py-0.5 text-[11px] text-fg-muted">
-              单程上限 {plan.maxTravelMin} 分钟
-            </span>
-          )}
-        </div>
-      )}
+      <div className="mt-1.5 flex flex-wrap gap-1">
+        {plan.budget != null && (
+          <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] text-emerald-600">
+            人均上限 ¥{plan.budget}
+          </span>
+        )}
+        {plan.maxTravelMin != null && (
+          <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[10px] text-fg-muted">
+            单程上限 {plan.maxTravelMin} 分钟
+          </span>
+        )}
+      </div>
+
       {(plan.hardConstraints.length > 0 || plan.softWishes.length > 0) && (
-        <div className="mt-3 space-y-1.5 border-t border-line pt-2.5">
+        <div className="mt-2 space-y-1 border-t border-line pt-1.5">
           {plan.hardConstraints.length > 0 && (
-            <p className="text-[11px] leading-relaxed">
-              <span className="text-amber-300">全体硬性条件</span>
+            <p className="text-[10px] leading-relaxed">
+              <span className="text-amber-600">全体硬性条件</span>
               <span className="text-fg-muted">：{plan.hardConstraints.join(" · ")}</span>
             </p>
           )}
           {plan.softWishes.length > 0 && (
-            <p className="text-[11px] leading-relaxed">
+            <p className="text-[10px] leading-relaxed">
               <span className="text-fg-dim">全体期望</span>
               <span className="text-fg-muted">：{plan.softWishes.join(" · ")}</span>
             </p>
@@ -818,22 +1117,13 @@ function RequirementCard({ plan }: { plan: PlanResult }) {
   );
 }
 
-const VERDICT_STYLE: Record<
-  NeedCheck["verdict"],
-  { label: string; cls: string; dot: string }
-> = {
-  pass: { label: "满足", cls: "text-green", dot: "bg-green" },
-  conflict: { label: "违背", cls: "text-red-400", dot: "bg-red-400" },
-  unknown: { label: "待确认", cls: "text-fg-dim", dot: "bg-white/30" },
-};
-
 function NeedPanel({ plan }: { plan: PlanResult }) {
   const needs = plan.needs ?? [];
   if (!needs.length) {
     return (
-      <div className="rounded-xl border border-line bg-bg/40 p-4">
-        <p className="text-xs text-fg-dim">逐条核对</p>
-        <p className="mt-1.5 text-[11px] leading-relaxed text-fg-muted">
+      <div className="mm-card-flat p-2.5">
+        <p className="text-[10px] text-fg-dim">逐条核对</p>
+        <p className="mt-1 text-[10px] leading-relaxed text-fg-muted">
           这次没从群聊里拆出可逐条核对的要求，AI 可能只给了整体结论。换个说法或在对话里补充一句会更容易拆开。
         </p>
       </div>
@@ -857,25 +1147,22 @@ function NeedPanel({ plan }: { plan: PlanResult }) {
   };
 
   return (
-    <div className="rounded-xl border border-line bg-bg/40 p-4">
+    <div className="mm-card-flat p-2.5">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-xs text-fg-dim">逐条核对 · 谁的要求更重</p>
-        <span className="rounded-md bg-white/6 px-1.5 py-0.5 text-[10px] text-fg-dim">
+        <p className="text-[10px] text-fg-dim">逐条核对 · 谁的要求更重</p>
+        <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[9px] text-fg-dim">
           {needs.length} 条要求
         </span>
       </div>
 
-      <div className="mt-2.5 space-y-1.5">
+      <div className="mt-1.5 space-y-1">
         {pressure
           .filter((p) => p.weight > 0)
           .map((p) => (
-            <div key={p.name} className="flex items-center gap-2">
-              <span
-                className="h-1.5 w-1.5 shrink-0 rounded-full"
-                style={{ background: p.color }}
-              />
-              <span className="w-9 shrink-0 text-[11px] text-fg-muted">{p.name}</span>
-              <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/8">
+            <div key={p.name} className="flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: p.color }} />
+              <span className="w-8 shrink-0 truncate text-[10px] text-fg-muted">{p.name}</span>
+              <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-[#eef3fc]">
                 <span
                   className="block h-full rounded-full"
                   style={{
@@ -884,11 +1171,8 @@ function NeedPanel({ plan }: { plan: PlanResult }) {
                   }}
                 />
               </span>
-              <span className="shrink-0 text-[10px] text-fg-dim">
-                {p.top
-                  .slice(0, 2)
-                  .map((t) => t.category)
-                  .join("·")}
+              <span className="shrink-0 text-[9px] text-fg-dim">
+                {p.top.slice(0, 2).map((t) => t.category).join("·")}
                 {p.hardCount > 0 ? ` · 硬 ${p.hardCount}` : ""}
               </span>
             </div>
@@ -896,60 +1180,56 @@ function NeedPanel({ plan }: { plan: PlanResult }) {
       </div>
 
       {plan.pick && (
-        <p className="mt-3 border-t border-line pt-2.5 text-[10px] leading-relaxed text-fg-dim">
+        <p className="mt-2 border-t border-line pt-1.5 text-[9.5px] leading-relaxed text-fg-dim">
           以下是每条要求对着「{plan.pick.name}」的核对结果：满足 {counts.pass} · 违背{" "}
           {counts.conflict} · 数据判断不了 {counts.unknown}
         </p>
       )}
 
-      <div className="mt-2 space-y-2.5">
+      <div className="mt-1.5 space-y-2">
         {groups.map((g) => (
           <div key={g.name}>
-            <p className="text-[11px] text-fg-muted">
+            <p className="text-[10px] text-fg-muted">
               <span
                 className="mr-1 inline-block h-1.5 w-1.5 rounded-full align-middle"
                 style={{ background: g.color }}
               />
               {g.name}
             </p>
-            <ul className="mt-1 space-y-1.5">
+            <ul className="mt-1 space-y-1">
               {g.items.map((c) => (
-                <li key={c.needId} className="rounded-lg border border-line/60 px-2 py-1.5">
+                <li key={c.needId} className="rounded-lg border border-line px-1.5 py-1">
                   <div className="flex items-start gap-1.5">
                     <span
-                      className={`mt-0.5 shrink-0 rounded px-1 text-[10px] ${
+                      className={`mt-[1px] shrink-0 rounded px-1 text-[9px] ${
                         c.strength === "hard"
-                          ? "bg-amber-400/15 text-amber-300"
+                          ? "bg-amber-50 text-amber-600"
                           : c.strength === "strong"
-                            ? "bg-white/8 text-fg-muted"
-                            : "bg-white/4 text-fg-dim"
+                            ? "bg-surface-2 text-fg-muted"
+                            : "bg-surface-2 text-fg-dim"
                       }`}
                     >
                       {NEED_STRENGTH_LABEL[c.strength]}
                     </span>
-                    <span className="min-w-0 flex-1 text-[11px] leading-relaxed text-fg">
+                    <span className="min-w-0 flex-1 text-[10px] leading-relaxed text-fg">
                       {c.text}
                     </span>
-                    <span
-                      className={`shrink-0 text-[10px] ${VERDICT_STYLE[c.verdict].cls}`}
-                    >
+                    <span className={`shrink-0 text-[9px] ${VERDICT_STYLE[c.verdict].cls}`}>
                       {VERDICT_STYLE[c.verdict].label}
                     </span>
                   </div>
-                  <p className="mt-0.5 text-[10px] leading-relaxed text-fg-dim">
+                  <p className="mt-0.5 text-[9px] leading-relaxed text-fg-dim">
                     原话「{c.quote}」
                   </p>
-                  <p className="mt-0.5 flex items-start gap-1 text-[10px] leading-relaxed text-fg-muted">
+                  <p className="mt-0.5 flex items-start gap-1 text-[9px] leading-relaxed text-fg-muted">
                     <span
-                      className={`mt-1 h-1 w-1 shrink-0 rounded-full ${
+                      className={`mt-[3px] h-1 w-1 shrink-0 rounded-full ${
                         VERDICT_STYLE[c.verdict].dot
                       }`}
                     />
                     <span>
                       {c.evidence}
-                      {c.source === "ai" && (
-                        <span className="ml-1 text-fg-dim">（AI 判断）</span>
-                      )}
+                      {c.source === "ai" && <span className="ml-1 text-fg-dim">（AI 判断）</span>}
                     </span>
                   </p>
                 </li>
@@ -960,24 +1240,22 @@ function NeedPanel({ plan }: { plan: PlanResult }) {
 
         {globalItems.length > 0 && (
           <div>
-            <p className="text-[11px] text-fg-muted">全体</p>
-            <ul className="mt-1 space-y-1.5">
+            <p className="text-[10px] text-fg-muted">全体</p>
+            <ul className="mt-1 space-y-1">
               {globalItems.map((c) => (
-                <li key={c.needId} className="rounded-lg border border-line/60 px-2 py-1.5">
+                <li key={c.needId} className="rounded-lg border border-line px-1.5 py-1">
                   <div className="flex items-start gap-1.5">
-                    <span className="mt-0.5 shrink-0 rounded bg-white/8 px-1 text-[10px] text-fg-muted">
+                    <span className="mt-[1px] shrink-0 rounded bg-surface-2 px-1 text-[9px] text-fg-muted">
                       {NEED_STRENGTH_LABEL[c.strength]}
                     </span>
-                    <span className="min-w-0 flex-1 text-[11px] leading-relaxed text-fg">
+                    <span className="min-w-0 flex-1 text-[10px] leading-relaxed text-fg">
                       {c.text}
                     </span>
-                    <span
-                      className={`shrink-0 text-[10px] ${VERDICT_STYLE[c.verdict].cls}`}
-                    >
+                    <span className={`shrink-0 text-[9px] ${VERDICT_STYLE[c.verdict].cls}`}>
                       {VERDICT_STYLE[c.verdict].label}
                     </span>
                   </div>
-                  <p className="mt-0.5 text-[10px] leading-relaxed text-fg-dim">
+                  <p className="mt-0.5 text-[9px] leading-relaxed text-fg-dim">
                     {c.evidence}
                     {c.source === "ai" && "（AI 判断）"}
                   </p>
@@ -989,7 +1267,7 @@ function NeedPanel({ plan }: { plan: PlanResult }) {
       </div>
 
       {counts.unknown > 0 && (
-        <p className="mt-2.5 border-t border-line pt-2 text-[10px] leading-relaxed text-fg-dim">
+        <p className="mt-1.5 border-t border-line pt-1.5 text-[9px] leading-relaxed text-fg-dim">
           「待确认」不是没查，是商户资料里确实没有这项（比如辣不辣、吵不吵、卫生如何）。这类只能到店确认，我没有替你猜。
         </p>
       )}
@@ -1025,26 +1303,23 @@ function MemberPanel({
   const unresolved = plan.members.filter((m) => !m.resolved);
 
   return (
-    <div className="rounded-xl border border-line bg-bg/40 p-4">
-      <div className="flex items-center justify-between">
-        <p className="text-xs text-fg-dim">
-          参与的人 · 每人各有自己的位置和要求
-        </p>
+    <div className="mm-card-flat p-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[10px] text-fg-dim">参与的人 · 每人各有自己的位置和要求</p>
         <span
-          className={`rounded-md px-1.5 py-0.5 text-[10px] ${
+          className={`rounded px-1.5 py-0.5 text-[9px] ${
             plan.members.every((m) => m.resolved)
-              ? "bg-white/6 text-fg-dim"
-              : "bg-amber-400/12 text-amber-300"
+              ? "bg-surface-2 text-fg-dim"
+              : "bg-amber-50 text-amber-600"
           }`}
         >
-          {plan.members.length} 人 · 已定位{" "}
-          {plan.members.filter((m) => m.resolved).length}
+          {plan.members.length} 人 · 已定位 {plan.members.filter((m) => m.resolved).length}
         </span>
       </div>
 
       {unresolved.length > 0 && (
-        <div className="mt-2 rounded-lg border border-amber-400/25 bg-amber-400/[0.06] px-2.5 py-1.5">
-          <p className="text-[10px] leading-relaxed text-amber-300">
+        <div className="mt-1.5 rounded-lg border border-amber-200 bg-amber-50/70 px-2 py-1.5">
+          <p className="text-[9.5px] leading-relaxed text-amber-700">
             {unresolved.map((m) => m.name).join("、")} 的话里没读出出发地，这几个人
             {unresolved.length === plan.members.length
               ? "全部没有位置，检索暂时以城市中心为基准"
@@ -1054,7 +1329,7 @@ function MemberPanel({
         </div>
       )}
 
-      <ul className="mt-2.5 space-y-2.5">
+      <ul className="mt-2 space-y-1.5">
         {plan.members.map((m) => {
           const leg = plan.pick?.perMember.find((l) => l.name === m.name);
           const route = plan.routes.find((r) => r.name === m.name);
@@ -1064,25 +1339,25 @@ function MemberPanel({
           const detail = route?.detail ?? leg?.detail ?? "";
 
           return (
-            <li key={m.name} className="rounded-lg border border-line/60 bg-surface/40 p-2.5">
-              <div className="flex items-start gap-2">
+            <li key={m.name} className="rounded-lg border border-line bg-[#fbfdff] p-2">
+              <div className="flex items-start gap-1.5">
                 <span
-                  className="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ring-2 ring-black/40"
-                  style={{ background: m.color }}
+                  className="mt-[5px] h-2 w-2 shrink-0 rounded-full ring-2 ring-white"
+                  style={{ background: m.color, boxShadow: `0 0 0 1px ${m.color}55` }}
                 />
                 <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                    <span className="text-sm font-medium">{m.name}</span>
-                    <span className="text-[11px] text-fg-dim">
+                  <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                    <span className="text-[11.5px] font-medium">{m.name}</span>
+                    <span className="text-[10px] text-fg-dim">
                       {m.resolved ? `从${m.originName}出发` : "出发地未识别"}
                     </span>
                     {!m.resolved && (
-                      <span className="rounded bg-amber-400/12 px-1 py-0.5 text-[10px] text-amber-300">
+                      <span className="rounded bg-amber-50 px-1 py-0.5 text-[9px] text-amber-600">
                         位置待确认
                       </span>
                     )}
                     {durationS != null && mode && (
-                      <span className="rounded bg-green/12 px-1.5 py-0.5 text-[10px] text-green">
+                      <span className="rounded bg-emerald-50 px-1 py-0.5 text-[9px] text-emerald-600">
                         {TRAVEL_LABEL[mode]} {fmtMin(durationS)}
                         {fare != null && ` · ${fmtFare(fare)}`}
                       </span>
@@ -1090,31 +1365,29 @@ function MemberPanel({
                   </div>
 
                   {detail && (
-                    <p className="mt-1 text-[10px] leading-relaxed text-fg-dim">
+                    <p className="mt-0.5 text-[9px] leading-relaxed text-fg-dim">
                       {detail}
                       {leg?.alt && (
                         <span>
                           {" "}
-                          ｜另一种：{TRAVEL_LABEL[leg.alt.mode]}{" "}
-                          {fmtMin(leg.alt.durationS)} · {fmtFare(leg.alt.fareYuan)}
+                          ｜另一种：{TRAVEL_LABEL[leg.alt.mode]} {fmtMin(leg.alt.durationS)} ·{" "}
+                          {fmtFare(leg.alt.fareYuan)}
                         </span>
                       )}
                     </p>
                   )}
 
                   {(m.constraints.length > 0 || m.wishes.length > 0) && (
-                    <p className="mt-1 text-[11px] leading-relaxed text-fg-muted">
+                    <p className="mt-0.5 text-[10px] leading-relaxed text-fg-muted">
                       {m.constraints.length > 0 && (
-                        <span className="text-amber-300/90">
-                          {m.constraints.join("、")}
-                        </span>
+                        <span className="text-amber-600/90">{m.constraints.join("、")}</span>
                       )}
                       {m.constraints.length > 0 && m.wishes.length > 0 && "；"}
                       {m.wishes.length > 0 && <span>想{m.wishes.join("、")}</span>}
                     </p>
                   )}
 
-                  <p className="mt-0.5 text-[10px] leading-relaxed text-fg-dim">
+                  <p className="mt-0.5 text-[9px] leading-relaxed text-fg-dim">
                     {m.originSource === "chat" && m.originQuote
                       ? `原话「${m.originQuote}」`
                       : m.originSource === "ai"
@@ -1127,22 +1400,22 @@ function MemberPanel({
                   </p>
 
                   {m.resolved && m.originAddress && (
-                    <p className="mt-0.5 truncate text-[10px] leading-relaxed text-fg-dim/80">
+                    <p className="mt-0.5 truncate text-[9px] leading-relaxed text-fg-dim/85">
                       定位到 {m.originAddress}
-                      <span className="text-fg-dim/60"> · 不对就点「改位置」</span>
+                      <span className="text-fg-dim/65"> · 不对就点「改位置」</span>
                     </p>
                   )}
 
                   <button
                     type="button"
                     onClick={() => onEdit(m.name)}
-                    className="mt-1 text-[10px] text-fg-dim underline underline-offset-2 transition-colors hover:text-fg-muted"
+                    className="mt-0.5 text-[9px] text-brand/80 underline underline-offset-2 transition-colors hover:text-brand"
                   >
                     {editing === m.name ? "收起" : "改位置"}
                   </button>
 
                   {editing === m.name && (
-                    <div className="mt-2 space-y-1.5 rounded-lg border border-line bg-bg/60 p-2">
+                    <div className="mt-1.5 space-y-1.5 rounded-lg border border-line bg-white p-1.5">
                       <div className="flex items-center gap-1.5">
                         <input
                           value={placeQuery}
@@ -1153,24 +1426,22 @@ function MemberPanel({
                             }
                           }}
                           placeholder="或输入地点，如「文三路」"
-                          className="h-7 flex-1 rounded-md border border-line bg-surface px-2 text-[11px] outline-none placeholder:text-fg-dim focus:border-green/40"
+                          className="mm-input h-7 min-w-0 flex-1 px-2 text-[10px]"
                         />
                         <button
                           type="button"
                           disabled={placeBusy || rerouting}
                           onClick={() => onSearch(m.name)}
-                          className="rounded-md border border-line px-2 py-1 text-[10px] text-fg-muted transition-colors hover:text-fg disabled:opacity-40"
+                          className="shrink-0 rounded-md border border-line px-2 py-1 text-[9px] text-fg-muted transition-colors hover:text-brand disabled:opacity-40"
                         >
                           {placeBusy ? "解析中" : "搜索"}
                         </button>
                       </div>
-                      {placeErr && (
-                        <p className="text-[10px] text-amber-300">{placeErr}</p>
-                      )}
+                      {placeErr && <p className="text-[9px] text-amber-600">{placeErr}</p>}
 
                       {placeOptions.length > 0 && (
                         <div className="space-y-1">
-                          <p className="text-[10px] text-fg-dim">
+                          <p className="text-[9px] text-fg-dim">
                             高德搜到这些，点一个就是他的出发地：
                           </p>
                           {placeOptions.map((o, idx) => (
@@ -1179,12 +1450,10 @@ function MemberPanel({
                               type="button"
                               disabled={rerouting}
                               onClick={() => onPick(m.name, o)}
-                              className="block w-full rounded-md border border-line bg-surface/60 px-2 py-1.5 text-left transition-colors hover:border-green/40 disabled:opacity-40"
+                              className="block w-full rounded-md border border-line bg-[#fbfdff] px-2 py-1 text-left transition-colors hover:border-brand/40 disabled:opacity-40"
                             >
-                              <span className="block truncate text-[11px] text-fg">
-                                {o.name}
-                              </span>
-                              <span className="block truncate text-[10px] text-fg-dim">
+                              <span className="block truncate text-[10px] text-fg">{o.name}</span>
+                              <span className="block truncate text-[9px] text-fg-dim">
                                 {o.address || "高德未提供详细地址"}
                               </span>
                             </button>
@@ -1200,180 +1469,9 @@ function MemberPanel({
         })}
       </ul>
 
-      <p className="mt-2.5 text-[10px] leading-relaxed text-fg-dim">
+      <p className="mt-1.5 text-[9px] leading-relaxed text-fg-dim">
         改了位置会围绕新位置重新检索地点，并重算每人的打车/地铁时间与车费，不会重新读群聊。
       </p>
-    </div>
-  );
-}
-
-function PickCard({ plan }: { plan: PlanResult }) {
-  if (!plan.pick) return null;
-  const p = plan.pick;
-  const facts = [
-    p.cost ? `人均 ${p.cost} 元` : "人均未标注",
-    p.rating ? `评分 ${p.rating}` : null,
-    p.openTime ? `营业 ${p.openTime}` : null,
-  ].filter(Boolean) as string[];
-
-  const legs = p.perMember.filter((l) => l.durationS != null);
-  const sc = p.score;
-  const parts = sc
-    ? [
-        { key: "需求", v: sc.parts.needs },
-        { key: "通勤", v: sc.parts.travel },
-        { key: "均衡", v: sc.parts.fairness },
-        { key: "花钱", v: sc.parts.cost },
-        { key: "口碑", v: sc.parts.quality },
-      ]
-    : [];
-
-  return (
-    <div className="rounded-xl border border-green/30 bg-green/[0.06] p-4">
-      <div className="flex items-center justify-between gap-2">
-        <span className="rounded-md bg-green/15 px-2 py-0.5 text-[11px] text-green">
-          高德实时检索 · 推荐
-        </span>
-        {sc && (
-          <span className="rounded-md bg-black/25 px-2 py-0.5 text-[11px] text-green">
-            综合 {sc.score} 分
-          </span>
-        )}
-      </div>
-      <p className="mt-2.5 text-base font-semibold">{p.name}</p>
-      <p className="mt-1 text-xs text-fg-muted">
-        {p.type || "类型未知"}
-        {p.address ? ` · ${p.address}` : ""}
-      </p>
-
-      <div className="mt-2.5 flex flex-wrap gap-1.5">
-        {facts.map((f) => (
-          <span
-            key={f}
-            className="rounded-md bg-white/6 px-2 py-0.5 text-[11px] text-fg-muted"
-          >
-            {f}
-          </span>
-        ))}
-      </div>
-
-      {legs.length > 0 && (
-        <div className="mt-3 rounded-lg border border-white/8 bg-black/20 p-2.5">
-          <p className="text-[10px] text-fg-dim">
-            每人怎么去 · 打车和地铁都算过，取更划算的那条
-          </p>
-          <ul className="mt-1.5 space-y-1.5">
-            {legs.map((l) => (
-              <li key={l.name} className="text-[11px]">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span
-                    className="h-1.5 w-1.5 shrink-0 rounded-full"
-                    style={{ background: l.color }}
-                  />
-                  <span className="w-10 shrink-0 text-fg-muted">{l.name}</span>
-                  {l.mode && (
-                    <span className="rounded bg-white/6 px-1 text-[10px] text-fg-dim">
-                      {TRAVEL_LABEL[l.mode]}
-                    </span>
-                  )}
-                  <span className="text-fg">{fmtMin(l.durationS)}</span>
-                  {l.fareYuan != null && (
-                    <span className="text-fg-dim">· {fmtFare(l.fareYuan)}</span>
-                  )}
-                </div>
-                {l.detail && (
-                  <p className="ml-[3.4rem] mt-0.5 text-[10px] leading-relaxed text-fg-dim">
-                    {l.detail}
-                  </p>
-                )}
-              </li>
-            ))}
-          </ul>
-          {sc && sc.worstMin != null && (
-            <p className="mt-2 border-t border-white/8 pt-1.5 text-[10px] leading-relaxed text-fg-dim">
-              最远 {sc.worstName} {sc.worstMin} 分钟 · 平均 {sc.avgMin} 分钟 · 首尾差{" "}
-              {sc.spreadMin} 分钟
-            </p>
-          )}
-        </div>
-      )}
-
-      {sc && (
-        <div className="mt-2.5 rounded-lg border border-white/8 bg-black/20 p-2.5">
-          <p className="text-[10px] text-fg-dim">为什么是这家 · 打分拆解</p>
-          <div className="mt-1.5 space-y-1">
-            {parts.map((x) => (
-              <div key={x.key} className="flex items-center gap-2">
-                <span className="w-7 shrink-0 text-[10px] text-fg-muted">
-                  {x.key}
-                </span>
-                <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/8">
-                  <span
-                    className="block h-full rounded-full bg-green/70"
-                    style={{ width: `${Math.max(2, x.v)}%` }}
-                  />
-                </span>
-                <span className="w-6 shrink-0 text-right text-[10px] tabular-nums text-fg-dim">
-                  {x.v}
-                </span>
-              </div>
-            ))}
-          </div>
-          {sc.totalPerPerson != null && (
-            <p className="mt-2 border-t border-white/8 pt-1.5 text-[11px] leading-relaxed text-fg-muted">
-              每人总花费（含往返车费）约{" "}
-              <span className="text-green">{sc.totalPerPerson} 元</span>
-              {plan.budget != null
-                ? sc.totalPerPerson <= plan.budget
-                  ? "，在预算内"
-                  : `，比预算多 ${sc.totalPerPerson - plan.budget} 元`
-                : ""}
-            </p>
-          )}
-        </div>
-      )}
-
-      <p className="mt-3 text-sm leading-relaxed text-fg-muted">{p.reason}</p>
-      {plan.trace.decisionFallback && (
-        <p className="mt-1 text-[10px] leading-relaxed text-amber-300/80">
-          AI 这次没返回理由（可能超时或额度用尽），上面是按综合分排序第一直接给出的结果。
-        </p>
-      )}
-      {(p.checks?.length ?? 0) > 0 && (
-        <p className="mt-1.5 text-[10px] leading-relaxed text-fg-dim">
-          需求核对：满足 {p.checks.filter((c) => c.verdict === "pass").length} 条 · 违背{" "}
-          {p.checks.filter((c) => c.verdict === "conflict").length} 条 · 数据判断不了{" "}
-          {p.checks.filter((c) => c.verdict === "unknown").length} 条
-        </p>
-      )}
-
-      {p.matchPoints.length > 0 && (
-        <ul className="mt-2.5 space-y-1">
-          {p.matchPoints.map((m) => (
-            <li key={m} className="flex gap-1.5 text-[11px] leading-relaxed text-fg-muted">
-              <Icon name="check" size={11} className="mt-0.5 shrink-0 text-green" />
-              <span>{m}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {p.cautions.length > 0 && (
-        <ul className="mt-2 space-y-1">
-          {p.cautions.map((c) => (
-            <li key={c} className="text-[11px] leading-relaxed text-amber-300/90">
-              注意：{c}
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-white/8 pt-2.5 text-[11px] text-fg-dim">
-        {p.tel && <span>电话 {p.tel.split(";")[0]}</span>}
-        <span className="font-mono">
-          {p.lat.toFixed(5)}, {p.lng.toFixed(5)}
-        </span>
-      </div>
     </div>
   );
 }
@@ -1390,45 +1488,38 @@ function RankRow({
 }) {
   return (
     <li
-      className={`rounded-lg border px-2.5 py-2 ${
-        current ? "border-green/40 bg-green/[0.06]" : "border-line/60"
+      className={`rounded-lg border px-2 py-1.5 ${
+        current ? "border-emerald-200 bg-emerald-50/60" : "border-line"
       }`}
     >
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1.5">
         {index != null && (
-          <span className="w-3 shrink-0 text-[10px] tabular-nums text-fg-dim">
-            {index}
-          </span>
+          <span className="w-3 shrink-0 text-[9px] tabular-nums text-fg-dim">{index}</span>
         )}
-        <span className="min-w-0 flex-1 truncate text-[13px]">{r.name}</span>
+        <span className="min-w-0 flex-1 truncate text-[11px]">{r.name}</span>
         {r.clear === false && !r.rejected && !current && (
-          <span className="shrink-0 rounded border border-amber-300/40 px-1 py-[1px] text-[9px] text-amber-300/90">
+          <span className="shrink-0 rounded border border-amber-200 px-1 py-[1px] text-[8.5px] text-amber-600">
             备选 · 资料不全
           </span>
         )}
         <span
-          className={`shrink-0 text-[11px] tabular-nums ${
-            current ? "text-green" : "text-fg-muted"
+          className={`shrink-0 text-[10px] tabular-nums ${
+            current ? "text-emerald-600" : "text-fg-muted"
           }`}
         >
           {r.score} 分
         </span>
       </div>
-      <p className="mt-0.5 pl-5 text-[10px] leading-relaxed text-fg-dim">
+      <p className="mt-0.5 pl-4 text-[9px] leading-relaxed text-fg-dim">
         最远 {r.worstName} {r.worstMin ?? "?"} 分钟 · 平均 {r.avgMin ?? "?"} 分钟
         {r.perCapita != null ? ` · 人均 ${r.perCapita} 元` : " · 人均未标注"}
-        {r.metroCount ? ` · ${r.metroCount} 人坐地铁` : ""} · 资料完整{" "}
-        {r.clarity}%
+        {r.metroCount ? ` · ${r.metroCount} 人坐地铁` : ""} · 资料完整 {r.clarity}%
       </p>
       {r.clear === false && !r.rejected && r.clearNote && (
-        <p className="mt-0.5 pl-5 text-[10px] leading-relaxed text-amber-300/80">
-          {r.clearNote}
-        </p>
+        <p className="mt-0.5 pl-4 text-[9px] leading-relaxed text-amber-600/90">{r.clearNote}</p>
       )}
       {r.rejected && (
-        <p className="mt-0.5 pl-5 text-[10px] leading-relaxed text-amber-300/90">
-          已排后：{r.rejected}
-        </p>
+        <p className="mt-0.5 pl-4 text-[9px] leading-relaxed text-amber-600">已排后：{r.rejected}</p>
       )}
     </li>
   );
@@ -1446,22 +1537,18 @@ function RankingCard({ plan }: { plan: PlanResult }) {
   const rejected = rest.filter((r) => r.rejected).slice(0, 2);
 
   return (
-    <details className="rounded-xl border border-line bg-bg/40 p-3.5">
-      <summary className="cursor-pointer list-none text-xs text-fg-muted">
+    <details className="mm-card-flat p-2.5">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 text-[10px] text-fg-muted">
         首选 + 备选 · 共 {all.length} 家（资料查得清的排前面）
-        <span className="ml-1 text-fg-dim">（点击展开）</span>
+        <Icon name="chevron-down" size={11} className="text-fg-dim" />
       </summary>
 
-      <ul className="mt-2.5 space-y-2">
-        {chosen && <RankRow r={chosen} current />}
-      </ul>
+      <ul className="mt-2 space-y-1.5">{chosen && <RankRow r={chosen} current />}</ul>
 
       {clearAlts.length > 0 && (
         <>
-          <p className="mt-3 text-[10px] text-fg-dim">
-            备选 · 要求都核对过，换个条件可以顶上
-          </p>
-          <ul className="mt-1.5 space-y-2">
+          <p className="mt-2 text-[9px] text-fg-dim">备选 · 要求都核对过，换个条件可以顶上</p>
+          <ul className="mt-1 space-y-1.5">
             {clearAlts.map((r, i) => (
               <RankRow key={r.id} r={r} index={i + 1} />
             ))}
@@ -1471,10 +1558,10 @@ function RankingCard({ plan }: { plan: PlanResult }) {
 
       {blurred.length > 0 && (
         <>
-          <p className="mt-3 text-[10px] text-fg-dim">
+          <p className="mt-2 text-[9px] text-fg-dim">
             备选 · 资料没说清，选之前得先确认（不参与首选比较）
           </p>
-          <ul className="mt-1.5 space-y-2">
+          <ul className="mt-1 space-y-1.5">
             {blurred.map((r, i) => (
               <RankRow key={r.id} r={r} index={i + 1} />
             ))}
@@ -1484,8 +1571,8 @@ function RankingCard({ plan }: { plan: PlanResult }) {
 
       {rejected.length > 0 && (
         <>
-          <p className="mt-3 text-[10px] text-fg-dim">已排除</p>
-          <ul className="mt-1.5 space-y-2">
+          <p className="mt-2 text-[9px] text-fg-dim">已排除</p>
+          <ul className="mt-1 space-y-1.5">
             {rejected.map((r, i) => (
               <RankRow key={r.id} r={r} index={i + 1} />
             ))}
@@ -1493,7 +1580,7 @@ function RankingCard({ plan }: { plan: PlanResult }) {
         </>
       )}
 
-      <p className="mt-2.5 text-[10px] leading-relaxed text-fg-dim">
+      <p className="mt-2 text-[9px] leading-relaxed text-fg-dim">
         检索词 {plan.keywords.join("、")} · 半径 {plan.trace.radius / 1000} km · 围绕
         {plan.trace.anchors.map((a) => a.name).join(" + ")} 检索 ·{" "}
         {plan.trace.transitQueries} 次地铁/公交查询 · 耗时{" "}

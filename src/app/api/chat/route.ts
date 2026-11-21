@@ -12,6 +12,7 @@ const ACT_IDS = [
   "sports",
   "shopping",
   "movie",
+  "other",
 ];
 
 type Turn = { role: "user" | "assistant"; text: string };
@@ -182,7 +183,7 @@ export async function POST(req: Request) {
     }
 
     const amapKey = String(
-      body.amapKey ?? process.env.AMAP_WEB_KEY ?? ""
+      (String(body.amapKey ?? "").trim() || process.env.AMAP_WEB_KEY || "")
     ).trim();
     if (!amapKey) {
       return NextResponse.json({ ok: true, reply, replanned: false });
@@ -190,6 +191,12 @@ export async function POST(req: Request) {
 
     const rawAct = String(body.activityId ?? plan?.activityId ?? "food").trim();
     const activityId = (ACT_IDS.includes(rawAct) ? rawAct : "food") as ActivityId;
+    // 选「其他」时用户自己补的那句话，选填；重排时优先用请求里的，没有再回落到上一版方案
+    const customActivity =
+      activityId === "other"
+        ? String(body.customActivity ?? "").trim().slice(0, 30) ||
+          (plan?.activityId === "other" ? plan.activityLabel : "")
+        : "";
     const rawOrigin = (body.origin ?? {}) as Record<string, unknown>;
     const oLat = Number(rawOrigin.lat);
     const oLng = Number(rawOrigin.lng);
@@ -208,6 +215,11 @@ export async function POST(req: Request) {
         : null;
 
     const chat = String(body.chat ?? "").trim();
+    // 没有群聊原文就没法重排；但用户这句话已经得到回复了，
+    // 不要因为重排失败把 reply 一起丢掉（之前会整个请求 400）。
+    if (chat.length < 10) {
+      return NextResponse.json({ ok: true, reply, replanned: false });
+    }
 
     const memberOverrides = Array.isArray(body.memberOverrides)
       ? (body.memberOverrides as unknown[])
@@ -229,6 +241,7 @@ export async function POST(req: Request) {
     const next = await buildPlan({
       chat,
       defaultActivityId: activityId,
+      customActivity,
       origin,
       config,
       amapKey,
@@ -241,8 +254,11 @@ export async function POST(req: Request) {
         message,
       ].slice(-6),
       city: typeof body.city === "string" ? body.city : undefined,
+      userMessage: message,
       previousPickName: plan?.pick?.name ?? null,
       avoidPickId: wantDifferent ? plan?.pick?.id ?? null : null,
+      // 上一版已经成立的要求要接住，别因为一次重抽就丢掉
+      previousNeeds: plan?.needs ?? [],
     });
 
     return NextResponse.json({ ok: true, reply, replanned: true, plan: next });

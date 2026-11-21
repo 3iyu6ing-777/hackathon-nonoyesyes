@@ -261,6 +261,6 @@ export function readConfig(raw: unknown): ApiConfig {
     key: String(cfg.key ?? process.env.DEEPSEEK_API_KEY ?? "").trim(),
     baseUrl: String(cfg.baseUrl ?? DEFAULT_BASE_URL).trim() || DEFAULT_BASE_URL,
     model: String(cfg.model ?? DEFAULT_MODEL).trim() || DEFAULT_MODEL,
-    amapKey: String(cfg.amapKey ?? process.env.AMAP_WEB_KEY ?? "").trim(),
+    amapKey: (String(cfg.amapKey ?? "").trim() || process.env.AMAP_WEB_KEY || "").trim(),
   };
 }

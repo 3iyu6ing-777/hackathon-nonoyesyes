@@ -8,7 +8,9 @@ export type ActivityId =
   | "escape"
   | "sports"
   | "shopping"
-  | "movie";
+  | "movie"
+  /** 不在上面这些分类里，由用户自己补一句（选填） */
+  | "other";
 
 export type Activity = {
   id: ActivityId;
@@ -16,7 +18,18 @@ export type Activity = {
   desc: string;
   supported: boolean;
   tint: string;
-  icon: "mountain" | "food" | "dice" | "book" | "lock" | "ball" | "bag" | "film";
+  icon:
+    | "mountain"
+    | "food"
+    | "dice"
+    | "book"
+    | "lock"
+    | "ball"
+    | "bag"
+    | "film"
+    | "sparkle";
+  /** 补充说明是选填的（目前只有「其他」这一类） */
+  optional?: boolean;
 };
 
 /**
@@ -88,6 +101,15 @@ export const ACTIVITIES: Activity[] = [
     tint: "#2b2b30",
     icon: "film",
   },
+  {
+    id: "other",
+    name: "其他",
+    desc: "不在上面？自己补一句",
+    supported: true,
+    tint: "#243044",
+    icon: "sparkle",
+    optional: true,
+  },
 ];
 
 /**
@@ -100,7 +122,11 @@ export type Origin = { name: string; lat: number; lng: number };
 
 export type RoomData = {
   id: string;
+  /** 房间名，创建时给一个默认值，界面上用来称呼这次聚会 */
+  title?: string;
   activityId?: ActivityId;
+  /** 选了「其他」时用户自己补的那句话，选填 */
+  customActivity?: string;
   chat?: string;
   createdAt: number;
 };
@@ -393,6 +419,11 @@ export type CandidateScore = {
   metroCount: number;
   /** 被硬性条件排除的原因，没有就是 null */
   rejected: string | null;
+  /**
+   * 违背硬性要求的严重程度合计（0 = 没违背）。
+   * 全部候选都踩线时，用它挑「伤得最轻」的那家，而不是挑「凑巧少踩一条」的。
+   */
+  violation: number;
 };
 
 /** 一次完整规划的结果，全部字段都来自实时计算 */
@@ -446,6 +477,8 @@ export type PlanResult = {
   routes: MemberRoute[];
   trace: {
     model: string;
+    /** 这次规划认定的城市，重算/追问时沿用 */
+    city?: string;
     searchMode: string;
     radius: number;
     candidateCount: number;

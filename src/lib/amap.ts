@@ -167,15 +167,15 @@ function dedupeAnchors(points: { lat: number; lng: number }[]) {
     if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) continue;
     if (out.some((q) => haversineM(q, p) < 400)) continue;
     out.push(p);
-    if (out.length >= 3) break;
+    if (out.length >= 5) break;
   }
   return out;
 }
 
 /**
  * 多点周边检索。
- * 只按一个人所在位置搜，另一头的人会被忽略；所以这里按「成员中心点 + 最远的那个人」
- * 各搜一遍，再合并。返回的 distance 统一成「到最近一个锚点」的距离。
+ * 只按一个人所在位置搜，另一头的人会被忽略；所以这里按「成员中心点 + 每个成员」各搜一遍，
+ * 再合并。返回的 distance 统一成「到最近一个锚点」的距离。
  */
 export async function searchPois(
   key: string,

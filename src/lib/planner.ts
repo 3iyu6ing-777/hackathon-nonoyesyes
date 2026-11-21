@@ -65,10 +65,10 @@ const MAX_CHAT = 12_000;
 const MAX_MEMBERS = 6;
 /** 最多拿多少个候选去测路程 */
 const MAX_MEASURED = 10;
-/** 其中前几名再补一次地铁/公交查询（这个接口只能单人单目的地，费配额） */
+/** 前几名再补一次地铁/公交查询（这个接口只能单人单目的地，费配额） */
 const PRELIM_FOR_TRANSIT = 10;
-/** 单次规划最多发多少个公交查询，防止一个请求打爆配额 */
-const MAX_TRANSIT_QUERIES = 40;
+/** 单次规划最多发多少个公交查询，防止一个请求打爆配额（人均一条即可，留点余量） */
+const MAX_TRANSIT_PER_MEMBER = 12;
 /** 步行可达距离，超过就没必要比打车了 */
 const WALK_LIMIT_M = 1800;
 const ACT_IDS = ACTIVITIES.map((a) => a.id);
@@ -83,6 +83,7 @@ const FALLBACK_KEYWORDS: Record<ActivityId, string[]> = {
   sports: ["体育馆"],
   shopping: ["商场"],
   movie: ["电影院"],
+  other: ["聚会"],
 };
 
 function strList(v: unknown, max: number, len: number): string[] {
@@ -96,6 +97,57 @@ function strList(v: unknown, max: number, len: number): string[] {
 
 function clamp01(n: number) {
   return Math.min(1, Math.max(0, n));
+}
+
+/** 群聊里没写城市名时，用常见商圈/地标兜一下，避免把成都的局算到杭州去 */
+const CITY_HINTS: { city: string; words: string[] }[] = [
+  { city: "成都", words: ["成都", "春熙路", "太古里", "天府广场", "高新区", "华西", "武侯", "锦里", "宽窄巷子", "犀浦", "双流", "郫县", "龙泉驿", "建设路", "玉林"] },
+  { city: "重庆", words: ["重庆", "解放碑", "观音桥", "洪崖洞", "沙坪坝", "渝中", "南坪", "大学城", "江北机场", "北碚"] },
+  { city: "北京", words: ["北京", "国贸", "中关村", "望京", "五道口", "三里屯", "西单", "朝阳门", "回龙观", "亦庄"] },
+  { city: "上海", words: ["上海", "陆家嘴", "静安寺", "徐家汇", "人民广场", "五角场", "张江", "虹桥", "七宝", "莘庄"] },
+  { city: "深圳", words: ["深圳", "南山", "福田", "罗湖", "宝安", "龙华", "科技园", "车公庙", "海岸城"] },
+  { city: "广州", words: ["广州", "天河", "珠江新城", "体育西", "越秀", "番禺", "客村", "岗顶"] },
+  { city: "南京", words: ["南京", "新街口", "鼓楼", "河西", "仙林", "江宁", "夫子庙"] },
+  { city: "武汉", words: ["武汉", "光谷", "江汉路", "街道口", "武昌", "汉阳", "楚河汉街"] },
+  { city: "西安", words: ["西安", "钟楼", "大雁塔", "小寨", "高新", "曲江", "回民街"] },
+  { city: "长沙", words: ["长沙", "五一广场", "黄兴路", "岳麓", "梅溪湖", "解放西"] },
+  { city: "苏州", words: ["苏州", "观前街", "园区", "平江路", "石路", "独墅湖"] },
+  { city: "杭州", words: ["杭州", "西湖", "滨江", "西溪", "三墩", "文三路", "钱江新城", "武林", "武林门", "城西", "下沙", "转塘", "古荡", "滨江区", "余杭", "萧山"] },
+];
+
+/** 只认「城市」这个量级：去掉省/市后缀，2-8 个字的中文地名 */
+function sanitizeCity(v: unknown): string {
+  const s = String(v ?? "")
+    .trim()
+    .replace(/[省市]$/g, "")
+    .replace(/\s+/g, "");
+  if (!/^[\u4e00-\u9fa5]{2,8}$/.test(s)) return "";
+  return s;
+}
+
+/** AI 没给出城市时的确定性兜底：先看群聊里有没有直接点名，再看地标 */
+function cityFromChat(chat: string): string {
+  const scored = CITY_HINTS.map(({ city, words }) => {
+    let score = 0;
+    for (const w of words) {
+      if (!chat.includes(w)) continue;
+      // 直接写了城市名，权重远高于只提到商圈
+      score += w === city ? 10 : 1;
+    }
+    return { city, score };
+  })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score);
+  return scored[0]?.city ?? "";
+}
+
+/** 剧本杀和密室在 AI 眼里经常互换；群聊原话里到底提的是哪个，以原话为准 */
+function refineActivity(id: ActivityId, chat: string): ActivityId {
+  const hasScript = /剧本杀|剧本|开本|欢乐本|情感本|推理本|硬核本/.test(chat);
+  const hasEscape = /密室/.test(chat);
+  if (hasScript && !hasEscape) return "boardgame";
+  if (hasEscape && !hasScript) return "escape";
+  return id;
 }
 
 function normalizeActivity(v: unknown, fallback: ActivityId): ActivityId {
@@ -523,6 +575,25 @@ function normStrength(v: unknown): NeedStrength {
 }
 
 /** 「半小时」「一小时」「80 元以内」这类说法折成数字，折不出来就返回 null */
+/**
+ * 从「晚上 7 点前要回家」「19:00 前得走」里读出当天的时间点（分钟数）。
+ * 只认「点 / :」这种明确说法，读不到就返回 null，不要瞎猜。
+ */
+function deadlineOf(text: string): number | null {
+  const s = text.replace(/[：]/g, ":");
+  const pm = /下午|晚上|傍晚|夜/.test(s);
+  const hit =
+    s.match(/(\d{1,2})\s*[:点]\s*(\d{1,2})?\s*分?/) ?? null;
+  if (hit) {
+    let h = Number(hit[1]);
+    const m = hit[2] ? Number(hit[2]) : 0;
+    if (!Number.isFinite(h) || h < 0 || h > 24) return null;
+    if (pm && h < 12) h += 12;
+    return h * 60 + m;
+  }
+  return null;
+}
+
 function numericValue(text: string, quote: string, category: NeedCategory) {
   const s = `${text} ${quote}`;
   if (category === "预算") {
@@ -540,6 +611,133 @@ function numericValue(text: string, quote: string, category: NeedCategory) {
     if (m) return Number(m[1]);
   }
   return null;
+}
+
+/**
+ * 用户后来追加的要求，凡是带「降 / 最多 / 以内」这种收紧语气的预算或时长，
+ * 直接在代码里落到 budget / maxTravelMin 上，不指望 AI 一定写进 needs。
+ * 现实是它更常写进 hardConstraints，而那份清单只出现在选点提示词里、
+ * 不参与打分 —— 于是「把预算降到 50」说完，榜单纹丝不动。
+ */
+const TIGHTEN_WORDS = /降|压|减|控制|改成|改到|最多|不超过|别超|以内|以下|便宜|省|近点|近一点/;
+const BUDGET_WORDS = /人均|每位|每人|预算|花销|花费|消费|价格|价位|贵/;
+
+function tightenNumber(t: string, kind: "budget" | "travel") {
+  const unit = kind === "budget" ? "(?:元|块|块钱)?" : "(?:分钟|分|min)?";
+  // 数字跟在「最多 / 不超过 / 降到」后面
+  const lead = [
+    ...t.matchAll(
+      new RegExp(
+        `(?:不超过|别超过|别超|最多|降到|压到|减到|控制在|改成|改到|只要)\\s*(\\d{1,4})\\s*${unit}`,
+        "g"
+      )
+    ),
+  ];
+  if (lead.length) return Math.min(...lead.map((m) => Number(m[1])));
+  // 数字在前，「以内 / 以下 / 封顶」
+  const tail = [
+    ...t.matchAll(new RegExp(`(\\d{1,4})\\s*${unit}\\s*(?:以内|以下|封顶)`, "g")),
+  ];
+  if (tail.length) return Math.min(...tail.map((m) => Number(m[1])));
+  return numericValue(t, "", kind === "budget" ? "预算" : "交通");
+}
+
+const CLAUSE_SPLIT = /[，,。；;、\n]/;
+
+function parseTighten(texts: string[]): {
+  budget: number | null;
+  maxTravelMin: number | null;
+  /** 触发收紧的那句原话，用来替换 needs 里的 quote */
+  budgetText: string | null;
+  travelText: string | null;
+  notes: string[];
+} {
+  let budget: number | null = null;
+  let maxTravelMin: number | null = null;
+  let budgetText: string | null = null;
+  let travelText: string | null = null;
+  for (const raw of texts) {
+    const t = String(raw ?? "").trim().slice(0, 80);
+    if (!t) continue;
+    // 「人均降到50，路上别超过40分钟」这种一句话两个约束，必须按子句拆开算，
+    // 否则会拿第一个数字（50）去当通勤时长。
+    for (const clause of t.split(CLAUSE_SPLIT)) {
+      const c = clause.trim();
+      if (!c || !TIGHTEN_WORDS.test(c)) continue;
+
+      const looksTravel = /分钟|min|小时/i.test(c);
+      const looksBudget =
+        BUDGET_WORDS.test(c) ||
+        (/以内|以下|封顶/.test(c) &&
+          !/(人|个|公里|km|米|分钟|小时)/i.test(c));
+
+      if (looksBudget && !looksTravel) {
+        const n = tightenNumber(c, "budget");
+        if (n != null && n >= 10 && n <= 2000) {
+          if (budget == null || n < budget) {
+            budget = n;
+            budgetText = c;
+          }
+        }
+      }
+      // 「别超过 30 分钟」这种不带「车程」二字的说法很常见，只要有分钟数就按通勤收
+      if (looksTravel) {
+        const n = tightenNumber(c, "travel");
+        if (n != null && n >= 3 && n <= 180) {
+          if (maxTravelMin == null || n < maxTravelMin) {
+            maxTravelMin = n;
+            travelText = c;
+          }
+        }
+      }
+    }
+  }
+  const notes: string[] = [];
+  if (budget != null) notes.push(`人均不超过 ${budget} 元`);
+  if (maxTravelMin != null) notes.push(`单程不超过 ${maxTravelMin} 分钟`);
+  return { budget, maxTravelMin, budgetText, travelText, notes };
+}
+
+/**
+ * 「小B 40 分钟那事可以放宽到 60」「人均放宽到 80 就行」。
+ * 收紧有人做，放宽没人做的话，用户只能干看着一条不现实的硬线把方案锁死。
+ */
+const RELAX_WORDS = /放宽|放松|可以到|能接受|提高到|加到|不介意/;
+
+function parseRelax(texts: string[]): {
+  budget: number | null;
+  travel: number | null;
+  who: string;
+} {
+  let budget: number | null = null;
+  let travel: number | null = null;
+  let who = "";
+  for (const raw of texts) {
+    const t = String(raw ?? "").trim().slice(0, 60);
+    if (!t || !RELAX_WORDS.test(t)) continue;
+    // 点名放宽谁的就只动谁；没点名就当成全体
+    const named = t.match(/^\s*([^\s，,。]{1,6})\s*(?:说|的话|那边|的)?/);
+    const isTravel = /分钟|min|小时/i.test(t);
+    // 「放宽到 70」里的 70 才是新的上限，别让前面的旧数字（40）抢了先
+    const after = t.match(
+      /(?:放宽|放松|可以到|能接受|提高到|加到|不介意)[^\d]{0,8}(\d{1,4})/
+    );
+    const n = after
+      ? Number(after[1])
+      : isTravel
+        ? tightenNumber(t, "travel")
+        : tightenNumber(t, "budget");
+    if (n == null) continue;
+    if (isTravel && n >= 5 && n <= 180) travel = Math.max(travel ?? 0, n);
+    else if (!isTravel && n >= 10 && n <= 2000) budget = Math.max(budget ?? 0, n);
+    if (named && membersMaybe(named[1])) who = named[1];
+  }
+  return { budget, travel, who };
+}
+
+/** 名字长得像人名才当归属，避免把「人均」当成谁的名字 */
+function membersMaybe(w: string) {
+  return /^[\u4e00-\u9fa5A-Za-z]{1,4}$/.test(w) && !/人均|预算|路上|时间|大家|全体/.test(w);
 }
 
 /**
@@ -661,9 +859,62 @@ function sanitizeNeeds(v: unknown, memberNames: string[]): Need[] {
   return out;
 }
 
+/**
+ * 重排时把上一版还成立的要求接回来。
+ * 同一份群聊每次重抽，AI 都可能少列一两条；少的那条不参与打分，
+ * 用户看到的就是「提了新要求，结果一点没变」。
+ * 只在 AI 这次完全没提到某个人时才补他的旧条目 —— 提了却删掉，视为有意修正。
+ */
+function mergeNeeds(fresh: Need[], previous: Need[]): Need[] {
+  if (!previous.length) return fresh;
+  const key = (n: Need) => `${n.who}|${n.category}`;
+  const seenWho = new Set(fresh.map((n) => n.who));
+  const seenKey = new Set(fresh.map(key));
+  const kept = previous.filter(
+    (n) => !seenWho.has(n.who) && !seenKey.has(key(n))
+  );
+  return kept.length ? [...fresh, ...kept] : fresh;
+}
+
+/**
+ * 要求去重。重排时上一版的要求会被接回来，AI 又会重新抽一遍，
+ * 同一条「单程不超过 30 分钟」可能攒成三条，核对表里就会重复三行。
+ */
+function dedupeNeeds(list: Need[]): Need[] {
+  const seen = new Set<string>();
+  const out: Need[] = [];
+  for (const n of list) {
+    const key = `${n.who}|${n.category}|${n.checkable}|${n.value ?? ""}|${n.text.replace(/\s/g, "")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(n);
+  }
+  return out;
+}
+
+/**
+ * 硬性条件去重。
+ * AI 写「人均不超过80元」、代码补「人均不超过 80 元」，是同一条，不该在界面上并排两条。
+ */
+function dedupeNotes(list: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of list) {
+    const t = String(raw ?? "").trim();
+    if (!t) continue;
+    const key = t.replace(/[\s，。；、,.;:：·]/g, "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
 type Extracted = {
   activityId: ActivityId;
   activityLabel: string;
+  /** 群聊里看出来的城市，空串表示没判断出来 */
+  city: string;
   requirements: Requirement[];
   keywords: string[];
   radius: number;
@@ -681,18 +932,32 @@ async function extract(
   chat: string,
   defaultActivityId: ActivityId,
   config: ApiConfig,
-  extra: string[]
+  extra: string[],
+  customLabel = ""
 ): Promise<{ data: Extracted; model: string }> {
-  const defaultLabel =
-    ACTIVITIES.find((a) => a.id === defaultActivityId)?.name ?? "待确认";
+  const custom = customLabel.trim().slice(0, 30);
+  // 用户在界面上选了「其他」，活动类型就不再由 AI 猜
+  const forcedOther = defaultActivityId === "other";
+  const defaultLabel = forcedOther
+    ? custom || "其他"
+    : ACTIVITIES.find((a) => a.id === defaultActivityId)?.name ?? "待确认";
 
   const system = `你是聚会需求分析器。任务：**咬文嚼字**地读完这段群聊，把每个人自己提的要求逐条拆出来，并判断他有多在意。
 
 只输出 JSON，不要任何解释文字：
-{"activityId":"boardgame","requirements":[{"label":"时间","value":"周六下午"}],"searchKeywords":["密室逃脱","剧本杀"],"radius":5000,"budgetYuan":80,"maxTravelMin":40,"hardConstraints":["人均不超过80元"],"softWishes":["能拍照"],"members":[{"name":"小A","originHint":"西溪","originQuote":"我住西溪那边 骑车过去十几分钟"},{"name":"小D","originHint":"文三路","originQuote":"我在文三路实习 过去远吗"}],"needs":[{"who":"小B","category":"时间","text":"五点前必须回去","quote":"五点前得回来 晚上有事","strength":"hard","polarity":"avoid"},{"who":"小D","category":"交通","text":"晕车，别坐太久的车","quote":"我随便 别太远就行 晕车","strength":"hard","polarity":"avoid"}]}
+{"activityId":"boardgame","city":"杭州","requirements":[{"label":"时间","value":"周六下午"}],"searchKeywords":["密室逃脱","剧本杀"],"radius":5000,"budgetYuan":80,"maxTravelMin":40,"hardConstraints":["人均不超过80元"],"softWishes":["能拍照"],"members":[{"name":"小A","originHint":"西溪","originQuote":"我住西溪那边 骑车过去十几分钟"},{"name":"小D","originHint":"文三路","originQuote":"我在文三路实习 过去远吗"}],"needs":[{"who":"小B","category":"时间","text":"五点前必须回去","quote":"五点前得回来 晚上有事","strength":"hard","polarity":"avoid"},{"who":"小D","category":"交通","text":"晕车，别坐太久的车","quote":"我随便 别太远就行 晕车","strength":"hard","polarity":"avoid"}]}
 
 规则：
-1. activityId 只能取这 8 个之一：hiking(徒步登山)、food(聚餐美食)、boardgame(桌游剧本)、cafe(咖啡书店)、escape(密室逃脱)、sports(运动健身)、shopping(逛街购物)、movie(观影演出)。以群聊里明确说出的为准，没说就用默认值。
+1. activityId 只能取这 9 个之一：hiking(徒步登山)、food(聚餐美食)、boardgame(桌游剧本)、cafe(咖啡书店)、escape(密室逃脱)、sports(运动健身)、shopping(逛街购物)、movie(观影演出)、other(其他)。以群聊里明确说出的为准，没说就用默认值。${
+    forcedOther
+      ? `\n   **界面已指定**：用户把活动选成了「其他」${
+          custom ? `，并写明「${custom}」` : "，但没有写具体是什么"
+        }。activityId 必须返回 other；searchKeywords 必须给出 2-4 个能直接在高德地图搜到店的具体词${
+          custom ? `，围绕「${custom}」展开（例如看展→["美术馆","展览馆","艺术中心"]）` : "，从群聊里推断出到底想干什么"
+        }，**不要用「聚会」「活动」「好玩的地方」这种搜不出店的泛词**。`
+      : ""
+  }
+1.1 city：这段群聊发生在哪个城市。**从地名、商圈、地标、地铁线路名判断**（"春熙路/天府广场/犀浦"→成都，"解放碑/观音桥"→重庆，"国贸/望京"→北京，"陆家嘴/徐家汇"→上海，"南山/车公庙"→深圳）。只写城市名两个字，不要带"市"；确实一点线索都没有才填"杭州"。
 2. requirements 的 label 只能取：活动、时间、预算、成员、禁忌、偏好，每个最多一次。群聊没提到的写"待确认"，不要编造。预算写成"人均 80 元左右"这种形式。
 3. budgetYuan：群里说的人均预算上限，纯数字；没提就填 null。**这是硬上限。**
 4. maxTravelMin：单程路上最多能接受多少分钟，纯数字；有人说了"五点前得回去""别太远"，按语气估一个合理值；完全没提就 null。
@@ -748,14 +1013,29 @@ async function extract(
     );
   }
 
-  const activityId = normalizeActivity(parsed.activityId, defaultActivityId);
-  const activityLabel =
-    ACTIVITIES.find((a) => a.id === activityId)?.name ?? defaultLabel;
+  // 界面选了「其他」时以用户的说法为准，别让 AI 又猜回某个固定分类
+  const activityId: ActivityId = forcedOther
+    ? "other"
+    : refineActivity(
+        normalizeActivity(parsed.activityId, defaultActivityId),
+        chat
+      );
+  const activityLabel = forcedOther
+    ? custom || "其他"
+    : ACTIVITIES.find((a) => a.id === activityId)?.name ?? defaultLabel;
 
   const rawKeywords = strList(parsed.searchKeywords, 4, 12);
-  const keywords = rawKeywords.length
-    ? rawKeywords
-    : FALLBACK_KEYWORDS[activityId];
+  let keywords = rawKeywords;
+  if (!keywords.length) {
+    if (activityId === "other") {
+      // 自定义活动没有兜底词表，只能用用户那句话本身去搜
+      keywords = custom
+        ? custom.split(/[\s、,，/·]+/).filter(Boolean).slice(0, 3)
+        : FALLBACK_KEYWORDS.other;
+    } else {
+      keywords = FALLBACK_KEYWORDS[activityId];
+    }
+  }
 
   const radiusRaw = Number(parsed.radius);
   const radius = Number.isFinite(radiusRaw)
@@ -829,6 +1109,7 @@ async function extract(
     data: {
       activityId,
       activityLabel,
+      city: sanitizeCity(parsed.city),
       requirements,
       keywords,
       radius,
@@ -1006,7 +1287,12 @@ async function resolveMembers(
 }
 
 /**
- * 检索锚点：成员几何中心 + 离中心最远的那个人。
+ * 检索锚点：成员几何中心 + 每个成员的出发点。
+ *
+ * 只搜「中心点 + 最远的那一个人」是不够的：最远的人能搜到，但夹在中间的人
+ * （比如城西 + 滨江 + 良渚 里的城西）永远落在半径之外，候选池里一个近的都没有，
+ * 最后就会变成「谁家附近店多就往谁家开会」。
+ * 所以 4 人以内每个人都当一个锚点；人更多时取中心点 + 离中心最远的 3 个人。
  * 只统计位置已确认的成员；一个都没有时退回 fallback（用户位置或城市中心）。
  */
 export function anchorsOf(
@@ -1019,27 +1305,31 @@ export function anchorsOf(
     : [{ name: fallback.name, lat: fallback.lat, lng: fallback.lng }];
   const lat = pts.reduce((a, m) => a + m.lat, 0) / pts.length;
   const lng = pts.reduce((a, m) => a + m.lng, 0) / pts.length;
+  const center = { name: "", lat, lng };
 
-  let far = pts[0];
-  let farD = -1;
-  for (const m of pts) {
-    const d = haversineM({ lat, lng }, m);
-    if (d > farD) {
-      farD = d;
-      far = m;
-    }
-  }
-
+  const centerD = pts.map((m) => haversineM(center, m));
+  const maxD = Math.max(...centerD);
   const label =
-    farD < 600
+    maxD < 600
       ? pts.length === 1
         ? pts[0].name
         : `${pts.length} 人所在区域`
       : `${pts.length} 人中心`;
 
   const out = [{ name: label, lat, lng }];
-  if (farD >= 600) out.push({ name: far.name, lat: far.lat, lng: far.lng });
-  return out;
+  if (maxD < 600) return out;
+
+  if (pts.length <= 4) {
+    // 人少，人人都要被覆盖到
+    return [...out, ...pts];
+  }
+  // 人多，取离中心最远的 3 个方向，避免全挤在市中心
+  const spread = [...pts]
+    .map((p, i) => ({ p, d: centerD[i] }))
+    .sort((a, b) => b.d - a.d)
+    .slice(0, 3)
+    .map((x) => x.p);
+  return [...out, ...spread];
 }
 
 function fmtKm(m: number | null) {
@@ -1211,8 +1501,14 @@ function travelPressureOf(needs: Need[], members: Member[]) {
   const map = new Map<string, number>();
   for (const m of members) map.set(m.name, 0);
   for (const n of needs) {
-    if (n.category !== "距离" && n.category !== "交通") continue;
     if (!n.who) continue;
+    // 「9 点前得回良渚」本质是通勤敏感：他能不能来，取决于路上要多久。
+    // 不把它算进压力，最远的那个人就一直被当成「反正他也没说不远」。
+    const travelSensitive =
+      n.category === "距离" ||
+      n.category === "交通" ||
+      (n.category === "时间" && /回|走|散|结束|到家|赶|离|前/.test(n.text));
+    if (!travelSensitive) continue;
     map.set(n.who, (map.get(n.who) ?? 0) + strengthWeight(n.strength));
   }
   return map;
@@ -1319,8 +1615,9 @@ function checksOf(poi: AmapPoi, legs: MemberLeg[], ctx: ScoreCtx): NeedCheck[] {
         );
       }
 
+      const hints = hintsOf(`${n.text} ${n.quote}`);
       let hit: string | null = null;
-      for (const hint of hintsOf(`${n.text} ${n.quote}`)) {
+      for (const hint of hints) {
         for (const w of hint.any) {
           if (hay.includes(w)) {
             hit = w;
@@ -1335,14 +1632,54 @@ function checksOf(poi: AmapPoi, legs: MemberLeg[], ctx: ScoreCtx): NeedCheck[] {
           `类型「${poi.type || "未标"}」命中「${hit}」`
         );
       }
+      // 「想吃火锅」而这家是面馆，这不是「资料查不到」，是明确不符 ——
+      // 场所类型是高德最可靠的字段，不能因为 AI 客气一句就放过。
+      if (hints.length) {
+        return {
+          ...base,
+          verdict: n.polarity === "avoid" ? "pass" : "conflict",
+          evidence: `类型「${poi.type || "未标"}」不是「${hints[0].any[0]}」类`,
+          source: "data",
+        };
+      }
       return judged(
         n.polarity === "avoid" ? "pass" : "unknown",
         `类型「${poi.type || "未标"}」里没有「${n.text}」相关`
       );
     }
 
-    // 时间类要求是行程约束，地点本身决定不了，别让它伪装成「这家店不满足」
+    // 时间类要求是行程约束：地点决定不了「几点前到家」，
+    // 但它决定了「这个人到底来不来得及」，所以要用真实路程算一算。
     if (n.category === "时间" && n.checkable === "none") {
+      const deadline = deadlineOf(`${n.text} ${n.quote}`);
+      const target = n.who ? mins.find((m) => m.name === n.who) : null;
+      if (deadline != null && target) {
+        const leave = deadline - target.min;
+        const hh = (v: number) =>
+          `${String(Math.floor((v % 1440) / 60)).padStart(2, "0")}:${String(
+            Math.round(v % 60)
+          ).padStart(2, "0")}`;
+        const travel = `${Math.round(target.min)} 分钟`;
+        // 16 点前就得离店，等于这场聚会根本坐不下来
+        if (leave < 16 * 60) {
+          return {
+            ...base,
+            verdict: "conflict",
+            evidence: `${hh(deadline)} 前要到家，单程 ${travel}，得 ${hh(
+              leave
+            )} 就离店，来不及`,
+            source: "data",
+          };
+        }
+        return {
+          ...base,
+          verdict: "unknown",
+          evidence: `${hh(deadline)} 前到家，就得 ${hh(
+            leave
+          )} 离店（单程 ${travel}）`,
+          source: "data",
+        };
+      }
       return judged("unknown", "行程约束，取决于路上时间和你们玩多久");
     }
 
@@ -1393,8 +1730,12 @@ function scoreOf(poi: AmapPoi, legs: MemberLeg[], ctx: ScoreCtx): CandidateScore
   const perCapita = Number(poi.cost) > 0 ? Number(poi.cost) : null;
   const ratingNum = Number(poi.rating) > 0 ? Number(poi.rating) : null;
 
-  const travel = worstW ? clamp01(1 - (worstW.w - 10) / 50) : 0.4;
-  const fairness = spread == null ? 0.5 : clamp01(1 - spread / 40);
+  // 曲线太陡会把「60 分钟」和「110 分钟」压成同一个 0 分，
+  // 于是「谁都别太远」这件事在排序里彻底消失（实测：小A 76 分、小E 107 分的店
+  // 和 19/37/22 分的店打平，最后靠 AI 随手挑）。这里放到 87 分钟才归零。
+  const travel = worstW ? clamp01(1 - (worstW.w - 12) / 75) : 0.4;
+  // 45 分钟归零太急：犀浦↔龙泉这种跨城组局，spread 永远 >45，均衡那 12% 直接失效
+  const fairness = spread == null ? 0.5 : clamp01(1 - spread / 70);
   const costScore =
     perCapita == null
       ? 0.45
@@ -1449,6 +1790,26 @@ function scoreOf(poi: AmapPoi, legs: MemberLeg[], ctx: ScoreCtx): CandidateScore
 
   // 资料不全就不该跟「逐条核对过」的店平起平坐，
   // 分数乘一个 0.8~1 的系数，让它自然落到备选区，而不是靠运气不中。
+  // 违背得有多狠：超时/超支按比例算，说不清的按 0.6 记。
+  // 全城都满足不了的时候，靠这个挑「伤得最轻」的那家。
+  // 「很想吃火锅却给挑了家面馆」也算伤 —— 否则一刀切地满足通勤，
+  // 会把这场局变成「大家都不远，但不是来吃火锅的」。
+  const strongMiss = softConflicts.filter(
+    (c) => c.strength === "strong" && c.category !== "距离" && c.category !== "交通"
+  ).length;
+  const violation = strongMiss + hardConflicts.reduce((sum, c) => {
+    const n = needById.get(c.needId);
+    if (!n) return sum + 0.6;
+    if (n.checkable === "travel" && n.value) {
+      const m = n.who ? mins.find((x) => x.name === n.who) : worst;
+      return sum + (m ? Math.max(0, (m.min - n.value) / n.value) : 0.6);
+    }
+    if (n.checkable === "cost" && n.value && perCapita != null) {
+      return sum + Math.max(0, (perCapita - n.value) / n.value);
+    }
+    return sum + 0.6;
+  }, 0);
+
   const clear = clarity >= 0.6 && unknownHard === 0;
   const clearNote = unknownHard
     ? `有 ${unknownHard} 条硬性要求（${blind
@@ -1463,16 +1824,28 @@ function scoreOf(poi: AmapPoi, legs: MemberLeg[], ctx: ScoreCtx): CandidateScore
           .join("、")}）在商户资料里查不到`
       : "";
 
-  // 权重：需求匹配 40% + 通勤 25% + 均衡 5% + 花钱 15% + 口碑 15%
+  // 权重：需求匹配 36% + 通勤 28% + 均衡 12% + 花钱 12% + 口碑 12%
   // 「需求匹配」是逐条核对后加权算出来的，改条件或改人，这一项立刻变。
+  // 均衡从 5% 提到 12%：一盘人散在城西、滨江、良渚时，让一个人跑 100 分钟
+  // 换来的那点「需求更贴」不值这么多分。
+  // 通勤上限不是「参考值」：最远的人超得越多，整体分就该被打下去。
+  // 否则「便宜 + 评分高」的远店会把中心区的店挤掉——实测成都一组人散在
+  // 犀浦/龙泉驿，郫都一家店有人要跑 106 分钟，仍然靠人均和评分排到第一。
+  // 1.6 倍上限之内不罚（上限本来就是估的），3 倍以上罚到一半。
+  const overCap =
+    ctx.maxTravelMin && worst
+      ? clamp01((worst.min / ctx.maxTravelMin - 1.6) / 1.4)
+      : 0;
+
   const score =
-    (needSum.value * 0.4 +
-      travel * 0.25 +
-      fairness * 0.05 +
-      costScore * 0.15 +
-      quality * 0.15) *
+    (needSum.value * 0.36 +
+      travel * 0.28 +
+      fairness * 0.12 +
+      costScore * 0.12 +
+      quality * 0.12) *
     100 *
-    (0.8 + 0.2 * clarity);
+    (0.8 + 0.2 * clarity) *
+    (1 - 0.5 * overCap);
 
   const fares = legs
     .filter((l) => l.fareYuan != null)
@@ -1512,23 +1885,71 @@ function scoreOf(poi: AmapPoi, legs: MemberLeg[], ctx: ScoreCtx): CandidateScore
     totalPerPerson: perCapita != null ? Math.round(perCapita + avgFare * 2) : null,
     metroCount: legs.filter((l) => l.mode === "transit").length,
     rejected,
+    violation: Math.round(violation * 100) / 100,
   };
 }
 
 /**
  * 从检索结果里挑出要实际测路程的候选。
- * 只取「离得最近的前几个」会全是评分很低的小店，所以混入评分最高的几家。
+ *
+ * 只按「离最近锚点的距离」取前几名，会出现「谁家附近店多、榜单就整个倒向谁家」
+ * （实测：城西 + 滨江 + 良渚 三人，最后 10 个候选全在滨江星光大道）。
+ * 所以先按「离哪个锚点最近」分组，组内按距离排，再各组轮流取，
+ * 保证每个人的区域都有代表进候选池，公平不公平交给真实路程去判。
+ * 另外混入评分最高的几家，避免候选全是路边小店。
  */
-export function pickCandidates(pois: AmapPoi[], limit: number): AmapPoi[] {
-  const near = pois.slice(0, Math.max(1, limit - 3));
+export function pickCandidates(
+  pois: AmapPoi[],
+  limit: number,
+  anchors: { lat: number; lng: number }[] = []
+): AmapPoi[] {
+  if (!pois.length) return [];
+  const out = new Map<string, AmapPoi>();
+
+  if (anchors.length >= 2) {
+    const groups = new Map<number, { p: AmapPoi; d: number }[]>();
+    for (const p of pois) {
+      let bi = 0;
+      let bd = Infinity;
+      anchors.forEach((a, i) => {
+        const d = haversineM(a, { lat: p.lat, lng: p.lng });
+        if (d < bd) {
+          bd = d;
+          bi = i;
+        }
+      });
+      const g = groups.get(bi);
+      if (g) g.push({ p, d: bd });
+      else groups.set(bi, [{ p, d: bd }]);
+    }
+    // 组内要按「到本组那个锚点」的距离排，不能用全局最近距离：
+    // 否则城西那组里排在前面的可能是离滨江更近的店，等于又偏回一个人。
+    const lists = [...groups.values()].map((g) =>
+      g.sort((a, b) => a.d - b.d).map((x) => x.p)
+    );
+    const quota = Math.max(1, Math.floor(limit / lists.length));
+    for (let round = 0; round < quota; round++) {
+      for (const list of lists) {
+        const p = list[round];
+        if (p && out.size < limit) out.set(p.id, p);
+      }
+    }
+    // 有的区域店少，名额没填满就从剩下的按距离补齐
+    for (const list of lists) {
+      for (const p of list) {
+        if (out.size < limit) out.set(p.id, p);
+      }
+    }
+  } else {
+    for (const p of pois.slice(0, Math.max(1, limit - 3))) out.set(p.id, p);
+  }
+
   const byRating = [...pois]
     .filter((p) => Number(p.rating) > 0)
     .sort((a, b) => Number(b.rating) - Number(a.rating))
     .slice(0, 4);
-  const map = new Map<string, AmapPoi>();
-  for (const p of near) map.set(p.id, p);
-  for (const p of byRating) if (map.size < limit) map.set(p.id, p);
-  return [...map.values()];
+  for (const p of byRating) if (out.size < limit) out.set(p.id, p);
+  return [...out.values()];
 }
 
 /** 按综合分从高到低排序。推荐一定出自这张榜的头部 */
@@ -1605,7 +2026,14 @@ export async function attachLegs(
     .slice(0, PRELIM_FOR_TRANSIT);
 
   const transitMap = new Map<string, (TransitResult | null)[]>();
-  let budgetLeft = MAX_TRANSIT_QUERIES;
+  // 每个人的地铁/公交方案都要算到。之前总量卡在 40 次，尾部的候选算不出地铁、
+  // 只剩打车时长，于是「没被查到地铁」的店看起来比查过的近一大截
+  // （小E 从良渚出发，同一家店打车 41 分钟、地铁 103 分钟）。
+  const transitBudget = Math.min(
+    members.length * MAX_TRANSIT_PER_MEMBER,
+    members.length * targets.length
+  );
+  let budgetLeft = transitBudget;
 
   await mapLimit(prelim, 5, async ({ poi }) => {
     const rows: (TransitResult | null)[] = new Array(members.length).fill(null);
@@ -1641,7 +2069,7 @@ export async function attachLegs(
 
   return {
     legsMap,
-    transitQueries: MAX_TRANSIT_QUERIES - budgetLeft,
+    transitQueries: transitBudget - budgetLeft,
   };
 }
 
@@ -1751,6 +2179,9 @@ async function decide(
    - unknown：现有资料看不出来。**信息不足时必须返回 unknown，绝对不许猜。**"卫生好不好""会不会吵"这类没有数据，就是 unknown。
    - why 不超过 14 字，只写依据，不要复述要求。
 3. 判 conflict 要保守：只有名称或类型能明确指向时才判，不要因为"可能"就打叉。
+   **口味类要求（不能吃辣 / 清淡 / 不要香菜 / 不吃内脏）属于菜单级，没有菜单数据一律 unknown**
+   —— 烧烤店可以点不辣的，火锅店有鸳鸯锅，只有店名/类型强指向（"麻辣烫""重庆老火锅"遇到"一点辣都不能吃"）才判 conflict。
+   同理「别太吵」「干不干净」没有数据依据，只能 unknown。
 4. 选店顺序：**任何一条 hard 要求被判 conflict 的候选都不选**；「资料完整度：不足」的候选只能进备选——除非所有候选资料都不足；再比 hard 要求满足的条数；最后才比综合分。
 5. 权重意识：说"随便/都行"的方面权重低，不要为了迁就这种"随便"去牺牲别人的硬要求；hard 条数多的人优先照顾。注意同一个人在不同方面强度不同，别把"想吃火锅"和"怕黑"当成同等份量。
 6. reason 必须引用真实数字和具体的人（如"小C 地铁3号线 5 站 56 分钟 ¥4""人均 68 元，在小A 的 80 元以内"），不许写候选里没有的信息。
@@ -1819,7 +2250,9 @@ ${formatRanked(offered, ranking, legsMap)}`;
       { role: "system", content: system },
       { role: "user", content: user },
     ],
-    { json: true, thinking: false, maxTokens: 2600 }
+    // 5 个人 × 8 条要求 × 4 个候选，checks 能到 32 条；2600 会被截断成
+    // 半截 JSON，整段决策直接降级成「综合分第一」的代码文案
+    { json: true, thinking: false, maxTokens: 3600 }
   );
 
   const parsed = parseJsonLoose(text);
@@ -1942,17 +2375,29 @@ async function mixLimit<R>(
 export type BuildPlanInput = {
   chat: string;
   defaultActivityId: ActivityId;
+  /** 选了「其他」时用户自己补的那句话，选填 */
+  customActivity?: string;
   /** 用户自己的出发点（可选）。没填就靠群聊里读到的出发地。 */
   origin: Origin | null;
   config: ApiConfig;
   amapKey: string;
   extraConstraints?: string[];
+  /**
+   * 用户这次亲手打的那句话。只有它算「新指令」：
+   * 历史条件拿来当数字参考可以，但不能据此把某个人的私人上限推广成全体。
+   */
+  userMessage?: string;
   city?: string;
   memberOverrides?: MemberOverride[];
   /** 上一版推荐的名字，让 AI 说清「换没换、为什么」 */
   previousPickName?: string | null;
   /** 用户点名不想再去的那家 */
   avoidPickId?: string | null;
+  /**
+   * 上一版已经成立的要求。追问重排时带上，AI 这次漏列的条目会被接回来，
+   * 免得「说了一条新要求，反而把原来三条要求弄丢了」。
+   */
+  previousNeeds?: Need[];
 };
 
 /** 从「候选 + 路程 + 评分」走到最终方案，两处入口（首次规划 / 只改位置）共用 */
@@ -2071,8 +2516,20 @@ async function finalize(input: {
   // 首选只从「资料能说清」的店里出：查不到资料的店再好也只是备选，
   // 否则会出现「推荐了一家连有没有包厢都不知道的店」。
   const candidatesOk = ranking.filter((r) => !r.rejected);
+  // 一家都满足不了的时候，按「踩得有多狠」挑伤得最轻的。
+  // 之前是直接取综合分第一，于是会出现「小B 在家门口 0 分钟、小E 单程 103 分钟」这种：
+  // 它恰好只踩了一条硬要求，就赢了「人人多跑一点但没人跑 100 分钟」的方案。
+  const impossible = candidatesOk.length === 0;
+  const leastBad = impossible
+    ? [...ranking].sort(
+        (a, b) => a.violation - b.violation || b.score - a.score
+      )
+    : [];
   const head =
-    candidatesOk.find((r) => r.clear) ?? candidatesOk[0] ?? ranking[0];
+    candidatesOk.find((r) => r.clear) ??
+    candidatesOk[0] ??
+    leastBad[0] ??
+    ranking[0];
   const best = candidates.find((c) => c.id === head?.id);
 
   let chosen =
@@ -2098,17 +2555,82 @@ async function finalize(input: {
     if (!mineScore?.clear && bestScore?.clear) {
       why.push(mineScore?.clearNote || "资料不全，判断不了");
     }
+    // AI 有时会为了「更贴需求」挑一家让某个人多跑一大段的店。
+    // 如果多跑的那段没有换来任何一条额外满足，就按人的体感改回榜首。
+    const gap = (mineScore?.worstMin ?? 0) - (bestScore?.worstMin ?? 0);
+    const gain =
+      (mineScore?.needStats.pass ?? 0) - (bestScore?.needStats.pass ?? 0);
+    if (gap >= 25 && gain <= 0) {
+      why.push(
+        `最远的人要多跑 ${Math.round(gap)} 分钟（${
+          mineScore?.worstName || "某人"
+        }），却没多满足任何一条要求`
+      );
+    }
+    if (
+      impossible &&
+      (mineScore?.violation ?? 0) > (bestScore?.violation ?? 0) + 0.05
+    ) {
+      why.push("对硬性条件的偏离更大，大家都得跟着多跑");
+    }
     if (why.length) {
       decisionNote = `AI 原本选的「${chosen.name}」${why.join("，")}，已改选「${best.name}」`;
       chosen = best;
     }
   }
 
+  // 唯一一家「完全合规」的店，如果代价是让某个人跑一小时以上，
+  // 而旁边有一家只在这一项上稍微超线、却能把最远的人压下来二十分钟以上，
+  // 就取后者，并把代价写清楚。硬性条件不该变成「某个人被牺牲」的许可证。
+  if (chosen && !impossible) {
+    const cleanWorst = rankOf(chosen.id)?.worstMin ?? 0;
+    if (cleanWorst >= 60) {
+      const alt = [...ranking]
+        .filter((r) => r.id !== chosen!.id && r.violation > 0 && r.violation <= 0.6)
+        .sort((a, b) => (a.worstMin ?? 999) - (b.worstMin ?? 999))
+        .find((r) => (r.worstMin ?? 999) <= cleanWorst - 20);
+      const altPoi = alt ? candidates.find((c) => c.id === alt.id) : null;
+      if (alt && altPoi) {
+        // 只有真的超了上限才写「超出 N 分钟」；换过去之后没人超线，
+        // 代价就是「个别要求得让步」，别再算出一个负数（-14 分钟很难看）
+        const over =
+          maxTravelMin != null &&
+          alt.worstMin != null &&
+          alt.worstMin > maxTravelMin
+            ? ` ${Math.round(alt.worstMin - maxTravelMin)} 分钟`
+            : "";
+        const note = `严格按硬线只能选「${chosen.name}」，但那样 ${
+          rankOf(chosen.id)?.worstName || "有人"
+        } 要跑 ${cleanWorst} 分钟；换成「${altPoi.name}」后最远 ${
+          alt.worstMin
+        } 分钟，${
+          over
+            ? `代价是${alt.worstName || "有人"}超出原定上限${over}`
+            : "代价是个别要求只能先让步"
+        }`;
+        // 直接覆盖：前面那条「AI 选 X 已改选 Y」已经被这次调换作废，
+        // 两条并存会出现「改选大块……已换成小牛满满」自相矛盾的一段话。
+        decisionNote = note;
+        chosen = altPoi;
+      }
+    }
+  }
+
   if (chosen && input.avoidPickId && chosen.id === input.avoidPickId) {
-    const alt = candidates.find(
-      (p) => p.id !== input.avoidPickId && ranking.some((r) => r.id === p.id && !r.rejected)
-    );
-    if (alt) chosen = alt;
+    // 用户说「换一家」：按分数榜往下取第一家没被排除、也没踩硬要求的，
+    // 而不是按检索顺序随手抓一家（那家可能分数很低，换了还不如不换）。
+    const alt =
+      ranking.find((r) => r.id !== input.avoidPickId && !r.rejected) ??
+      // 一家都没完全满足时，「换一家」也得真的换，不能原地不动
+      leastBad.find((r) => r.id !== input.avoidPickId) ??
+      ranking.find((r) => r.id !== input.avoidPickId);
+    const altPoi = alt ? candidates.find((c) => c.id === alt.id) : null;
+    if (altPoi) {
+      decisionNote = `${decisionNote ? `${decisionNote}；` : ""}按你的要求换掉了「${
+        chosen.name
+      }」`;
+      chosen = altPoi;
+    }
   }
   if (!chosen) {
     throw new PlannerError("NO_CANDIDATE", "没有可用的候选地点");
@@ -2125,6 +2647,44 @@ async function finalize(input: {
         chosen.tel ? `，建议先打 ${chosen.tel} 确认` : "，建议先打电话确认"
       }`
     : "";
+  // 条件本身打架（有人要 40 分钟内、有人 19 点前必须到家，而大家隔着半座城）时，
+  // 别假装挑到了完美解：说清冲突，让用户自己决定要不要放宽。
+  // 首选靠牺牲某个人换来的时候，明说代价。
+  // 「小B 在家门口 0 分钟、小E 单程 103 分钟」这种方案不该装作皆大欢喜。
+  const sacrificeCaution = (() => {
+    const far = (chosenScore?.worstMin ?? 0) >= 60 ? chosenScore?.worstName : "";
+    if (!far) return "";
+    const leg = legs.find((l) => l.name === far);
+    const min = leg?.durationS != null ? Math.round(leg.durationS / 60) : null;
+    if (min == null) return "";
+    const own = needs.find(
+      (n) => n.who === far && (n.category === "时间" || n.category === "距离")
+    );
+    const ownText = own ? `，而 ${far} 说过「${own.text}」` : "";
+    return `${far} 到这家单程要 ${min} 分钟${ownText}，这一版是按其他条件换来的，建议先在群里问一句`;
+  })();
+
+  const tradeoffCaution =
+    impossible && head?.rejected
+      ? `这些条件没有一家能同时满足：${head.rejected}。下面是折中方案，真要去这家，建议先在群里确认一下`
+      : "";
+  // 冲突说明已经讲了「谁被牺牲」，就别再重复一遍；整体最多留 4 条，
+  // 否则卡片上会堆一屏提示，用户反而不看。
+  const cautions = (
+    impossible
+      ? [
+          ...(overridden ? [] : (decision?.cautions ?? [])),
+          tradeoffCaution,
+          clarityCaution,
+        ]
+      : [
+          ...(overridden ? [] : (decision?.cautions ?? [])),
+          clarityCaution,
+          sacrificeCaution,
+        ]
+  )
+    .filter((c): c is string => Boolean(c))
+    .slice(0, 4);
   const routes = await buildRoutes(
     { lat: chosen.lat, lng: chosen.lng },
     members,
@@ -2180,10 +2740,7 @@ async function finalize(input: {
             chosen.cost || "未知"
           }，评分 ${chosen.rating || "未知"}。`,
       matchPoints: overridden ? [] : (decision?.matchPoints ?? []),
-      cautions: [
-        ...(overridden ? [] : (decision?.cautions ?? [])),
-        ...(clarityCaution ? [clarityCaution] : []),
-      ],
+      cautions,
       perMember: legs,
       checks,
       score: chosenScore ?? null,
@@ -2192,6 +2749,7 @@ async function finalize(input: {
     routes,
     trace: {
       model: "",
+      city: input.city,
       searchMode: input.searchMode,
       radius: input.radius,
       candidateCount: candidates.length,
@@ -2217,15 +2775,186 @@ export async function buildPlan(input: BuildPlanInput): Promise<PlanResult> {
       "缺少高德 Web 服务 Key，无法检索真实地点"
     );
   }
-  const city = input.city?.trim() || "杭州";
 
   // 1) AI 读群聊：全体条件 + 每个人的说法 + 预算/通勤上限
   const { data: ex, model } = await extract(
     chat,
     input.defaultActivityId,
     input.config,
-    input.extraConstraints ?? []
+    input.extraConstraints ?? [],
+    input.customActivity ?? ""
   );
+
+  // 1.1) 城市：调用方显式指定 > AI 从群聊判断 > 地标兜底 > 杭州
+  //      以前写死杭州，粘一段成都的群聊会被拿去杭州搜店，位置全对不上。
+  const city = input.city?.trim() || ex.city || cityFromChat(chat) || "杭州";
+
+  // 1.5) 把「降预算 / 别超过 30 分钟」这类追加要求硬落到数字上。
+  //      只靠 AI 写进 needs 太不稳，经常变成一句进不了打分的 hardConstraints。
+  //      初次规划也顺手从 hardConstraints 里补一遍数字，防止 AI 忘填 budgetYuan。
+  const pickTighter = (a: number | null, b: number | null) =>
+    a == null ? b : b == null ? a : Math.min(a, b);
+  const extraTighten = parseTighten(input.extraConstraints ?? []);
+  // 用户这一次亲手打的那句话。之前把「上一版的条件」也一起解析，
+  // 结果小B 的私人 40 分钟在第二次重排时被抬成了全体的 40 分钟。
+  const typedTighten = parseTighten(input.userMessage ? [input.userMessage] : []);
+  const hardTighten = parseTighten(ex.hardConstraints);
+  let budget = pickTighter(ex.budget, pickTighter(extraTighten.budget, hardTighten.budget));
+  let maxTravelMin = pickTighter(
+    ex.maxTravelMin,
+    pickTighter(extraTighten.maxTravelMin, hardTighten.maxTravelMin)
+  );
+  const tightenNotes = Array.from(
+    new Set([...extraTighten.notes, ...hardTighten.notes])
+  );
+  const hardConstraints = dedupeNotes([
+    ...ex.hardConstraints,
+    ...tightenNotes,
+  ]).slice(0, 7);
+  // 重排时把上一版还没被推翻的要求接回来
+  let needs = mergeNeeds(ex.needs, input.previousNeeds ?? []);
+
+  // 用户新提的预算要改写 needs 里那条「人均 80」——否则核对表还按旧上限放行，
+  // 榜单看起来就像完全没动。只认界面上追加的要求，别去改群聊里某人自己的预算。
+  if (typedTighten.budget != null) {
+    const target = typedTighten.budget;
+    const quote = typedTighten.budgetText || `人均不超过 ${target} 元`;
+    let touched = false;
+    needs = needs.map((n) => {
+      if (n.category !== "预算" || n.checkable !== "cost") return n;
+      touched = true;
+      return {
+        ...n,
+        who: "",
+        value: target,
+        text: `人均不超过 ${target} 元`,
+        quote,
+        strength: "hard" as const,
+      };
+    });
+    if (!touched) {
+      needs.push({
+        id: `x${needs.length + 1}`,
+        who: "",
+        category: "预算",
+        text: `人均不超过 ${target} 元`,
+        quote,
+        strength: "hard",
+        polarity: "avoid",
+        checkable: "cost",
+        value: target,
+      });
+    }
+  }
+  if (typedTighten.maxTravelMin != null) {
+    const target = typedTighten.maxTravelMin;
+    // 「路上别超过 30 分钟」是对所有人说的，不是只对小B。
+    // 之前只把已有的那条（小B 的 40 分钟）改成 30，其余人照旧放行，
+    // 于是榜单上还能出现「小E 单程 104 分钟」。
+    let touched = false;
+    needs = needs.map((n) => {
+      if (n.checkable !== "travel") return n;
+      touched = true;
+      return {
+        ...n,
+        who: "",
+        value: target,
+        text: `单程不超过 ${target} 分钟`,
+        strength: "hard" as const,
+      };
+    });
+    if (!touched) {
+      needs.push({
+        id: `x${needs.length + 1}`,
+        who: "",
+        category: "距离",
+        text: `单程不超过 ${target} 分钟`,
+        quote: extraTighten.travelText || `路上别超过 ${target} 分钟`,
+        strength: "hard",
+        polarity: "avoid",
+        checkable: "travel",
+        value: target,
+      });
+    }
+  }
+  // 用户主动放宽（「小B 40 分钟可以放宽到 60」）时，把那条数字真的抬上去，
+  // 否则一句「可以放宽」在系统里毫无作用，方案还是原地锁死。
+  const relax = parseRelax(input.userMessage ? [input.userMessage] : []);
+  const raise = (
+    kind: "travel" | "cost",
+    target: number,
+    who: string
+  ): boolean => {
+    let hit = false;
+    needs = needs.map((n) => {
+      if (n.checkable !== kind) return n;
+      if (who && n.who !== who) return n;
+      hit = true;
+      const v = Math.max(n.value ?? 0, target);
+      return {
+        ...n,
+        value: v,
+        text:
+          kind === "travel"
+            ? `单程不超过 ${v} 分钟`
+            : `人均不超过 ${v} 元`,
+        strength: "hard" as const,
+      };
+    });
+    return hit;
+  };
+  if (relax.travel != null) {
+    const hit = raise("travel", relax.travel, relax.who);
+    // 点名了谁就建在谁头上：AI 这一轮可能没把那条抽成「可判定」的要求，
+    // 放宽不该因此落空。
+    if (!hit) {
+      needs.push({
+        id: `x${needs.length + 1}`,
+        who: relax.who,
+        category: "距离",
+        text: `单程不超过 ${relax.travel} 分钟`,
+        quote: "放宽了路上的时间",
+        strength: "hard",
+        polarity: "avoid",
+        checkable: "travel",
+        value: relax.travel,
+      });
+    }
+    if (!relax.who) {
+      maxTravelMin =
+        maxTravelMin == null ? relax.travel : Math.max(maxTravelMin, relax.travel);
+    }
+  }
+  if (relax.budget != null) {
+    const hit = raise("cost", relax.budget, relax.who);
+    if (!hit) {
+      needs.push({
+        id: `x${needs.length + 1}`,
+        who: relax.who,
+        category: "预算",
+        text: `人均不超过 ${relax.budget} 元`,
+        quote: "放宽了预算",
+        strength: "hard",
+        polarity: "avoid",
+        checkable: "cost",
+        value: relax.budget,
+      });
+    }
+    if (!relax.who) {
+      budget = budget == null ? relax.budget : Math.max(budget, relax.budget);
+    }
+  }
+
+  needs = dedupeNeeds(needs);
+  // 收紧后的预算要写在界面上，否则用户只看到「说降了预算」但那一行数字没动
+  const requirements = (() => {
+    if (budget == null) return ex.requirements;
+    const value = `人均不超过 ${budget} 元`;
+    const idx = ex.requirements.findIndex((r) => r.label === "预算");
+    if (idx < 0) return [{ label: "预算", value }, ...ex.requirements];
+    if (ex.requirements[idx].value === value) return ex.requirements;
+    return ex.requirements.map((r, i) => (i === idx ? { ...r, value } : r));
+  })();
 
   // 2) 成员落点：AI 读到的出发地 + 原话兜底，都要过高德地理编码
   //    没有任何位置信息时才退回「用户自己的出发点」，再不行就用城市中心
@@ -2285,15 +3014,15 @@ export async function buildPlan(input: BuildPlanInput): Promise<PlanResult> {
   const plan = await finalize({
     activityId: ex.activityId,
     activityLabel: ex.activityLabel,
-    requirements: ex.requirements,
+    requirements,
     keywords: ex.keywords,
-    hardConstraints: ex.hardConstraints,
+    hardConstraints,
     softWishes: ex.softWishes,
-    budget: ex.budget,
-    maxTravelMin: ex.maxTravelMin,
+    budget,
+    maxTravelMin,
     members,
-    needs: ex.needs,
-    candidates: pickCandidates(pois, MAX_MEASURED),
+    needs,
+    candidates: pickCandidates(pois, MAX_MEASURED, anchors),
     config: input.config,
     amapKey: input.amapKey,
     city,
@@ -2321,7 +3050,8 @@ export async function reroutePlan(input: {
 }): Promise<PlanResult> {
   const started = Date.now();
   const { plan, memberOverrides, config, amapKey } = input;
-  const city = input.city?.trim() || "杭州";
+  // 重算沿用上一版认定的城市，别因为调用方没传就退回杭州
+  const city = input.city?.trim() || plan.trace.city?.trim() || "杭州";
 
   if (!amapKey.trim()) {
     throw new PlannerError(
@@ -2362,7 +3092,7 @@ export async function reroutePlan(input: {
       perKeyword: 8,
       city,
     });
-    candidates = pickCandidates(pois, MAX_MEASURED);
+    candidates = pickCandidates(pois, MAX_MEASURED, anchors);
   } catch {
     candidates = [];
   }

@@ -1,15 +1,19 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #0a0a0b;
-  --surface: #141416;
-  --surface-2: #1b1b1e;
-  --line: rgba(255, 255, 255, 0.08);
-  --fg: #f5f5f6;
-  --fg-muted: #9d9da3;
-  --fg-dim: #6c6c73;
-  --green: #4ade80;
-  --blue: #60a5fa;
+  --bg: #f4f7fe;
+  --surface: #ffffff;
+  --surface-2: #f5f8ff;
+  --line: #e8eefb;
+  --line-strong: #d9e4f8;
+  --fg: #0e1729;
+  --fg-muted: #5a6b87;
+  --fg-dim: #94a3b8;
+  --brand: #2563eb;
+  --brand-2: #3b82f6;
+  --brand-soft: #eef4ff;
+  --green: #10b981;
+  --amber: #f59e0b;
 }
 
 @theme inline {
@@ -17,28 +21,37 @@
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
   --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
   --color-fg: var(--fg);
   --color-fg-muted: var(--fg-muted);
   --color-fg-dim: var(--fg-dim);
+  --color-brand: var(--brand);
+  --color-brand-2: var(--brand-2);
+  --color-brand-soft: var(--brand-soft);
   --color-green: var(--green);
-  --color-blue: var(--blue);
+  --color-amber: var(--amber);
 }
 
 html {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 body {
-  background: var(--bg);
   color: var(--fg);
   font-family:
     -apple-system, "Segoe UI", "Microsoft YaHei", "PingFang SC",
     "Noto Sans SC", sans-serif;
   -webkit-font-smoothing: antialiased;
+  background:
+    radial-gradient(1100px 520px at 82% -12%, #dbe8ff 0%, rgba(219, 232, 255, 0) 62%),
+    radial-gradient(820px 440px at 4% -6%, #e6f0ff 0%, rgba(230, 240, 255, 0) 58%),
+    radial-gradient(900px 480px at 50% 108%, #eaf1ff 0%, rgba(234, 241, 255, 0) 60%),
+    var(--bg);
+  background-attachment: fixed;
 }
 
 ::selection {
-  background: rgba(74, 222, 128, 0.28);
+  background: rgba(37, 99, 235, 0.16);
 }
 
 textarea::placeholder,
@@ -46,29 +59,178 @@ input::placeholder {
   color: var(--fg-dim);
 }
 
+/* ---------- 基础组件 ---------- */
+
+.mm-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  box-shadow:
+    0 14px 34px -24px rgba(30, 64, 175, 0.4),
+    0 2px 8px rgba(30, 64, 175, 0.04);
+}
+
+.mm-card-flat {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+}
+
+.mm-soft {
+  background: #f7faff;
+  border: 1px solid #eef3fc;
+  border-radius: 14px;
+}
+
+.mm-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #fff;
+  font-weight: 600;
+  background: linear-gradient(180deg, #3f8bfb 0%, #2563eb 100%);
+  border-radius: 999px;
+  box-shadow:
+    0 12px 22px -10px rgba(37, 99, 235, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    filter 0.18s ease;
+}
+
+.mm-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.04);
+  box-shadow:
+    0 16px 26px -10px rgba(37, 99, 235, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28);
+  transform: translateY(-1px);
+}
+
+.mm-btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.mm-btn-primary:disabled {
+  cursor: not-allowed;
+  background: #cfdcf3;
+  box-shadow: none;
+  color: #fff;
+}
+
+.mm-btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--fg-muted);
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  transition:
+    color 0.16s ease,
+    border-color 0.16s ease,
+    background 0.16s ease;
+}
+
+.mm-btn-ghost:hover:not(:disabled) {
+  color: var(--brand);
+  border-color: #c3d7fb;
+  background: #f8fbff;
+}
+
+.mm-btn-ghost:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.mm-input {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  border-radius: 14px;
+  outline: none;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    background 0.16s ease;
+}
+
+.mm-input:focus {
+  background: #fff;
+  border-color: #b9cffb;
+  box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+}
+
+.mm-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+
+.mm-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #d3e1f7 transparent;
+}
+
+.mm-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.mm-scroll::-webkit-scrollbar-thumb {
+  background: #d3e1f7;
+  border-radius: 999px;
+}
+
+.mm-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes mm-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.mm-in {
+  animation: mm-up 0.4s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 /* ---------- 交互地图（Leaflet + 高德瓦片） ---------- */
+
 .mm-map.leaflet-container {
-  background: #101012;
+  background: #eef4fb;
   font-family: inherit;
   outline: none;
 }
 
-/* 高德瓦片偏亮，压暗 + 降饱和融入深色卡片 */
 .mm-map .leaflet-tile-pane {
-  filter: invert(0.94) hue-rotate(180deg) brightness(0.86) contrast(0.88) saturate(0.55);
+  filter: saturate(1.04) brightness(1.03);
 }
 
 .mm-map .leaflet-tooltip.mm-label {
-  background: rgba(10, 10, 11, 0.86) !important;
-  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  background: #fff !important;
+  border: 1px solid #e2ebfa !important;
   border-radius: 999px !important;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45) !important;
-  color: #e8e8ea !important;
+  box-shadow: 0 8px 18px -10px rgba(15, 23, 42, 0.5) !important;
+  color: #10203a !important;
   font-size: 11px !important;
   line-height: 1.4 !important;
-  padding: 3px 8px !important;
+  padding: 3px 9px !important;
   white-space: nowrap;
-  /* 成员标签现在带出发地，名字长的（「阿May的室友」）要截断，别把地图撑乱 */
   max-width: 200px;
   overflow: hidden;
 }
@@ -79,35 +241,17 @@ input::placeholder {
 
 .mm-map .leaflet-control-zoom {
   border: none !important;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4) !important;
-}
-
-.mm-map .leaflet-control-zoom a {
-  background: #1b1b1e !important;
-  color: #e8e8ea !important;
-  border: 1px solid rgba(255, 255, 255, 0.12) !important;
-  border-radius: 8px !important;
-  width: 30px !important;
-  height: 30px !important;
-  line-height: 28px !important;
-  font-size: 16px !important;
-}
-
-.mm-map .leaflet-control-zoom a:hover {
-  background: #26262a !important;
-}
-
-.mm-map .leaflet-control-zoom-in {
-  margin-bottom: 6px !important;
+  box-shadow: 0 8px 20px -12px rgba(15, 23, 42, 0.45) !important;
+  display: none;
 }
 
 .mm-map .leaflet-control-attribution {
-  background: rgba(10, 10, 11, 0.6) !important;
-  color: #9a9aa2 !important;
+  background: rgba(255, 255, 255, 0.82) !important;
+  color: #94a3b8 !important;
   font-size: 10px !important;
-  border-radius: 6px 0 0 0;
+  border-radius: 8px 0 0 0;
 }
 
 .mm-map .leaflet-control-attribution a {
-  color: #b6b6be !important;
+  color: #64748b !important;
 }

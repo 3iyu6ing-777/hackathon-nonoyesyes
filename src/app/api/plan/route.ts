@@ -12,6 +12,7 @@ const ACT_IDS = [
   "sports",
   "shopping",
   "movie",
+  "other",
 ];
 
 /**
@@ -62,7 +63,7 @@ export async function POST(req: Request) {
   }
 
   const amapKey = String(
-    body.amapKey ?? process.env.AMAP_WEB_KEY ?? ""
+    (String(body.amapKey ?? "").trim() || process.env.AMAP_WEB_KEY || "")
   ).trim();
   if (!amapKey) {
     return NextResponse.json(
@@ -79,6 +80,11 @@ export async function POST(req: Request) {
 
   const rawAct = String(body.activityId ?? "").trim();
   const activityId = (ACT_IDS.includes(rawAct) ? rawAct : "food") as ActivityId;
+  // 选「其他」时用户自己补的那句话，选填；没有就让 AI 从群聊里判断
+  const customActivity =
+    activityId === "other"
+      ? String(body.customActivity ?? "").trim().slice(0, 30)
+      : "";
 
   const memberOverrides = Array.isArray(body.memberOverrides)
     ? (body.memberOverrides as unknown[])
@@ -102,6 +108,7 @@ export async function POST(req: Request) {
     const plan = await buildPlan({
       chat: String(body.chat ?? ""),
       defaultActivityId: activityId,
+      customActivity,
       origin: pickOrigin(body.origin),
       config,
       amapKey,

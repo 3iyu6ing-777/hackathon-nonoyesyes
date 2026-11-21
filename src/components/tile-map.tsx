@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { RefObject } from "react";
 import type { Map as LeafletMap } from "leaflet";
 import "leaflet/dist/leaflet.css";
 
@@ -25,6 +26,15 @@ export type MapLine = {
   dashed?: boolean;
 };
 
+/** 给外面的工具条用的地图操作 */
+export type MapApi = {
+  zoomIn: () => void;
+  zoomOut: () => void;
+  fitSpot: () => void;
+  fitMembers: () => void;
+  fitAll: () => void;
+};
+
 /** 高德矢量瓦片（GCJ-02）。国内直连，无需 Key。 */
 const TILE_URL =
   "https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}";
@@ -35,26 +45,49 @@ function safeColor(c: string | undefined, fallback: string) {
 }
 
 function dotHtml(color: string, size: number) {
-  const inner = Math.round(size * 0.55);
+  const inner = Math.round(size * 0.58);
   const off = Math.round((size - inner) / 2);
-  return `<div style="position:relative;width:${size}px;height:${size}px"><span style="position:absolute;left:${off}px;top:${off}px;width:${inner}px;height:${inner}px;border-radius:9999px;background:${color};box-shadow:0 0 0 2px rgba(10,10,11,0.85)"></span></div>`;
+  return `<div style="position:relative;width:${size}px;height:${size}px"><span style="position:absolute;left:${off}px;top:${off}px;width:${inner}px;height:${inner}px;border-radius:9999px;background:${color};box-shadow:0 0 0 2.5px #ffffff, 0 2px 6px rgba(15,23,42,0.35)"></span></div>`;
 }
 
-const SPOT_HTML = `<div style="position:relative;width:22px;height:22px">
-  <span style="position:absolute;inset:0;border-radius:9999px;background:rgba(74,222,128,0.22)"></span>
-  <span style="position:absolute;left:6px;top:6px;width:10px;height:10px;border-radius:9999px;background:#4ade80;box-shadow:0 0 0 2px rgba(10,10,11,0.85)"></span>
+const SPOT_HTML = `<div style="position:relative;width:32px;height:40px">
+  <span style="position:absolute;left:8px;bottom:0;width:16px;height:5px;border-radius:9999px;background:rgba(15,23,42,0.18);filter:blur(1px)"></span>
+  <svg width="32" height="40" viewBox="0 0 32 40" fill="none" style="position:absolute;left:0;top:0">
+    <path d="M16 39S29 25.4 29 15.6C29 8.1 23.2 2 16 2S3 8.1 3 15.6C3 25.4 16 39 16 39z" fill="#2563eb"/>
+    <path d="M16 39S29 25.4 29 15.6C29 8.1 23.2 2 16 2S3 8.1 3 15.6C3 25.4 16 39 16 39z" stroke="#ffffff" stroke-width="2.4"/>
+    <circle cx="16" cy="15.4" r="5.4" fill="#ffffff"/>
+  </svg>
 </div>`;
 
 function escapeHtml(s: string) {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
+function boundsOf(pts: [number, number][]) {
+  let minLat = pts[0][0];
+  let maxLat = pts[0][0];
+  let minLng = pts[0][1];
+  let maxLng = pts[0][1];
+  for (const [lat, lng] of pts) {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  }
+  return [
+    [minLat, minLng],
+    [maxLat, maxLng],
+  ] as [[number, number], [number, number]];
+}
+
 export default function TileMap({
   points,
   lines,
+  apiRef,
 }: {
   points: MapPoint[];
   lines?: MapLine[];
+  apiRef?: RefObject<MapApi | null>;
 }) {
   const holder = useRef<HTMLDivElement>(null);
   const mapRef = useRef<LeafletMap | null>(null);
@@ -116,43 +149,50 @@ export default function TileMap({
         });
         tiles.addTo(map);
 
-        L.control.zoom({ position: "bottomright" }).addTo(map);
-
         // 先画路线，再落点，保证点压在线上面
         for (const line of lineData) {
           if (line.points.length < 2) continue;
           L.polyline(line.points, {
-            color: safeColor(line.color, "#71717a"),
+            color: safeColor(line.color, "#7c8aa5"),
             weight: 3,
-            opacity: 0.72,
+            opacity: 0.8,
             lineCap: "round",
-            dashArray: line.dashed ? "6 8" : undefined,
+            dashArray: line.dashed ? "7 9" : undefined,
           }).addTo(map);
         }
 
-        const latlngs: [number, number][] = [];
+        const all: [number, number][] = [];
+        const members: [number, number][] = [];
+        const spots: [number, number][] = [];
 
         for (const p of list) {
           const isSpot = p.kind === "spot";
           const isCandidate = p.kind === "candidate";
-          const isMember = p.kind === "member";
-          const size = isSpot ? 22 : isCandidate ? 12 : 16;
-          const half = size / 2;
+          const size = isCandidate ? 13 : 16;
           const color = isSpot
-            ? "#4ade80"
-            : safeColor(p.color, isCandidate ? "#a1a1aa" : "#60a5fa");
-          const html = isSpot ? SPOT_HTML : dotHtml(color, size);
-          const prefix = isSpot ? "推荐 · " : isCandidate ? "候选 · " : "";
+            ? "#2563eb"
+            : safeColor(p.color, isCandidate ? "#a8b6cc" : "#3b82f6");
 
-          latlngs.push([p.lat, p.lng]);
+          all.push([p.lat, p.lng]);
+          if (isSpot) spots.push([p.lat, p.lng]);
+          if (p.kind === "member") members.push([p.lat, p.lng]);
+
+          const icon = isSpot
+            ? L.divIcon({
+                className: "",
+                html: SPOT_HTML,
+                iconSize: [32, 40],
+                iconAnchor: [16, 39],
+              })
+            : L.divIcon({
+                className: "",
+                html: dotHtml(color, size),
+                iconSize: [size, size],
+                iconAnchor: [size / 2, size / 2],
+              });
 
           const marker = L.marker([p.lat, p.lng], {
-            icon: L.divIcon({
-              className: "",
-              html,
-              iconSize: [size, size],
-              iconAnchor: [half, half],
-            }),
+            icon,
             keyboard: false,
             zIndexOffset: isSpot ? 1000 : isCandidate ? -100 : 100,
           }).addTo(map);
@@ -160,29 +200,43 @@ export default function TileMap({
           // 成员点常驻标签：光一个彩色圆点看不出「谁、从哪来」，
           // 落点错的时候用户也发现不了。带上出发地就能一眼核对。
           const label = p.sub
-            ? `${escapeHtml(p.name)}<span style="opacity:.62"> · ${escapeHtml(p.sub)}</span>`
+            ? `${escapeHtml(p.name)}<span style="opacity:.6"> · ${escapeHtml(p.sub)}</span>`
             : escapeHtml(p.name);
 
           marker.bindTooltip(
-            `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:9999px;background:${color};display:inline-block"></span>${prefix}${label}</span>`,
+            `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:9999px;background:${color};display:inline-block"></span>${isSpot ? "推荐 · " : isCandidate ? "候选 · " : ""}${label}</span>`,
             {
               // 推荐点与成员点常驻，候选点悬停显示，避免重叠时互相遮挡
-              permanent: isSpot || isMember,
-              direction: "right",
-              offset: [12, 0],
+              permanent: isSpot || p.kind === "member",
+              direction: isSpot ? "right" : "right",
+              offset: isSpot ? [18, -14] : [12, 0],
               className: "mm-label",
             }
           );
         }
 
-        if (latlngs.length === 1) {
-          map.setView(latlngs[0], 14);
-        } else if (latlngs.length > 1) {
-          map.fitBounds(L.latLngBounds(latlngs), {
-            padding: [40, 40],
-            maxZoom: 14,
-          });
+        const fit = (pts: [number, number][], maxZoom = 15) => {
+          if (cancelled) return;
+          if (pts.length === 1) map.setView(pts[0], Math.max(14, maxZoom));
+          else if (pts.length > 1)
+            map.fitBounds(L.latLngBounds(boundsOf(pts)), {
+              padding: [46, 46],
+              maxZoom,
+            });
+        };
+
+        if (apiRef) {
+          apiRef.current = {
+            zoomIn: () => map.zoomIn(),
+            zoomOut: () => map.zoomOut(),
+            fitSpot: () => fit(spots.length ? spots : all, 15),
+            fitMembers: () => fit(members.length ? members : all, 14),
+            fitAll: () => fit(all, 14),
+          };
         }
+
+        // 首屏尽量把「所有人 + 推荐点」都放进来，别一上来就只盯着推荐点
+        if (all.length) fit(all, 14);
 
         mapRef.current = map;
         setReady(true);
@@ -199,50 +253,28 @@ export default function TileMap({
       cancelled = true;
       mapRef.current?.remove();
       mapRef.current = null;
+      if (apiRef) apiRef.current = null;
       setReady(false);
     };
+    // apiRef 是稳定引用，不参与依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signature]);
 
-  const hasCandidate = points.some((p) => p.kind === "candidate");
-  const hasLines = lineList.length > 0;
-  const memberCount = points.filter((p) => p.kind === "member").length;
-
   return (
-    <div className="relative h-full w-full min-h-[300px]">
+    <div className="relative h-full w-full min-h-[220px]">
       <div ref={holder} className="mm-map absolute inset-0" />
 
       {!ready && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-surface">
-          <p className="text-xs text-fg-dim">地图加载中…</p>
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-[#eef4fb]">
+          <p className="text-[11px] text-fg-dim">地图加载中…</p>
         </div>
       )}
 
       {tileFailed && (
-        <div className="pointer-events-none absolute inset-x-3 bottom-3 z-[500] rounded-lg bg-black/70 px-3 py-2 text-[11px] leading-relaxed text-amber-300 backdrop-blur">
+        <div className="pointer-events-none absolute inset-x-3 bottom-3 z-[500] rounded-lg bg-white/95 px-3 py-2 text-[11px] leading-relaxed text-amber-600 shadow-lg">
           地图瓦片加载失败，请检查网络后刷新；标记位置仍按坐标显示。
         </div>
       )}
-
-      <div className="pointer-events-none absolute left-3 top-3 z-[500] flex flex-col gap-1.5">
-        <span className="w-fit rounded-full bg-black/65 px-2.5 py-0.5 text-[11px] text-green backdrop-blur">
-          绿点：推荐地点
-        </span>
-        <span className="w-fit rounded-full bg-black/65 px-2.5 py-0.5 text-[11px] text-fg-muted backdrop-blur">
-          {memberCount > 1 ? `${memberCount} 个彩点：每位成员` : "蓝点：出发位置"}
-        </span>
-        {hasCandidate && (
-          <span className="w-fit rounded-full bg-black/65 px-2.5 py-0.5 text-[11px] text-zinc-400 backdrop-blur">
-            灰点：其他候选
-          </span>
-        )}
-        {hasLines && (
-          <span className="w-fit rounded-full bg-black/65 px-2.5 py-0.5 text-[11px] text-fg-dim backdrop-blur">
-            {lineList.some((l) => l.dashed)
-              ? "彩线：实线打车 · 虚线地铁/公交"
-              : "彩线：各人前往路线"}
-          </span>
-        )}
-      </div>
     </div>
   );
 }

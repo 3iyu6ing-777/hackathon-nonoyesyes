@@ -18,7 +18,7 @@ export async function POST(req: Request) {
   }
 
   const amapKey = String(
-    body.amapKey ?? process.env.AMAP_WEB_KEY ?? ""
+    (String(body.amapKey ?? "").trim() || process.env.AMAP_WEB_KEY || "")
   ).trim();
   if (!amapKey) {
     return NextResponse.json(

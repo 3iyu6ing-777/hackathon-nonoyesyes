@@ -17,7 +17,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const amapKey = String(body.amapKey ?? process.env.AMAP_WEB_KEY ?? "").trim();
+  const amapKey = (String(body.amapKey ?? "").trim() || process.env.AMAP_WEB_KEY || "").trim();
   if (!amapKey) {
     return NextResponse.json(
       { ok: false, error: "缺少高德 Web 服务 Key" },
